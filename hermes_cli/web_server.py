@@ -753,6 +753,85 @@ async def get_status():
     }
 
 
+@app.get("/api/system/stats")
+async def get_system_stats():
+    """Host + process system stats for the System page.
+
+    OS / Python / host identity from stdlib; CPU / memory / disk / uptime from
+    psutil when available, with graceful degradation when it isn't.  Read-only
+    and non-sensitive (no env values, no paths beyond the hermes home root).
+    """
+    import platform as _platform
+
+    info: Dict[str, Any] = {
+        "os": _platform.system(),
+        "os_release": _platform.release(),
+        "os_version": _platform.version(),
+        "platform": _platform.platform(),
+        "arch": _platform.machine(),
+        "hostname": _platform.node(),
+        "python_version": _platform.python_version(),
+        "python_impl": _platform.python_implementation(),
+        "hermes_version": __version__,
+        "cpu_count": os.cpu_count(),
+    }
+
+    # psutil enriches the picture when present; everything below is optional.
+    try:
+        import psutil  # type: ignore
+
+        vm = psutil.virtual_memory()
+        info["memory"] = {
+            "total": vm.total,
+            "available": vm.available,
+            "used": vm.used,
+            "percent": vm.percent,
+        }
+        try:
+            du = psutil.disk_usage(str(get_hermes_home()))
+            info["disk"] = {
+                "total": du.total,
+                "used": du.used,
+                "free": du.free,
+                "percent": du.percent,
+            }
+        except Exception:
+            pass
+        try:
+            info["cpu_percent"] = psutil.cpu_percent(interval=0.1)
+            la = getattr(psutil, "getloadavg", None)
+            if la:
+                info["load_avg"] = list(la())
+        except Exception:
+            pass
+        try:
+            boot = psutil.boot_time()
+            info["uptime_seconds"] = int(time.time() - boot)
+        except Exception:
+            pass
+        try:
+            proc = psutil.Process()
+            info["process"] = {
+                "pid": proc.pid,
+                "rss": proc.memory_info().rss,
+                "create_time": int(proc.create_time()),
+                "num_threads": proc.num_threads(),
+            }
+        except Exception:
+            pass
+        info["psutil"] = True
+    except Exception:
+        info["psutil"] = False
+        # stdlib-only fallbacks for load average + uptime where the kernel
+        # exposes them.
+        try:
+            info["load_avg"] = list(os.getloadavg())
+        except (OSError, AttributeError):
+            pass
+
+    return info
+
+
 # ---------------------------------------------------------------------------
 # Gateway + update actions (invoked from the Status page).
 #
@@ -4163,6 +4242,129 @@ async def test_mcp_server(name: str):
     }
 
 
+class MCPEnabledToggle(BaseModel):
+    enabled: bool
+
+
+@app.put("/api/mcp/servers/{name}/enabled")
+async def set_mcp_server_enabled(name: str, body: MCPEnabledToggle):
+    """Enable or disable an MCP server (takes effect on next session/gateway).
+
+    Toggles the ``enabled`` key on the server's config.yaml entry — the same
+    flag the agent reads at startup.  Disabled servers stay in config so they
+    can be re-enabled without re-entering their settings.
+    """
+    cfg = load_config()
+    servers = cfg.get("mcp_servers")
+    if not isinstance(servers, dict) or name not in servers:
+        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+    if not isinstance(servers[name], dict):
+        raise HTTPException(status_code=400, detail="Malformed server config")
+    servers[name]["enabled"] = bool(body.enabled)
+    save_config(cfg)
+    return {"ok": True, "name": name, "enabled": bool(body.enabled)}
+
+
+@app.get("/api/mcp/catalog")
+async def list_mcp_catalog():
+    """Browse the Nous-approved MCP catalog (the optional-mcps/ manifests).
+
+    Each entry reports whether it's already installed and enabled so the UI
+    can show install / enabled state inline.  This is the same catalog
+    `hermes mcp catalog` / `hermes mcp install` read.
+    """
+    try:
+        from hermes_cli import mcp_catalog
+    except Exception as exc:
+        _log.exception("mcp_catalog import failed")
+        raise HTTPException(status_code=500, detail=f"Catalog unavailable: {exc}")
+
+    entries = []
+    try:
+        for entry in mcp_catalog.list_catalog():
+            auth = entry.auth
+            entries.append({
+                "name": entry.name,
+                "description": entry.description,
+                "source": entry.source,
+                "transport": entry.transport.type,
+                "auth_type": getattr(auth, "type", "none"),
+                # Env vars the user must supply (names + prompts only, never values).
+                "required_env": [
+                    {"name": e.name, "prompt": e.prompt, "required": e.required}
+                    for e in getattr(auth, "env", []) or []
+                ],
+                "needs_install": entry.install is not None,
+                "installed": mcp_catalog.is_installed(entry.name),
+                "enabled": mcp_catalog.is_enabled(entry.name),
+            })
+    except Exception:
+        _log.exception("list_mcp_catalog failed")
+
+    diagnostics = []
+    try:
+        diagnostics = [
+            {"name": n, "kind": k, "message": m}
+            for (n, k, m) in mcp_catalog.catalog_diagnostics()
+        ]
+    except Exception:
+        pass
+
+    return {"entries": entries, "diagnostics": diagnostics}
+
+
+class MCPCatalogInstall(BaseModel):
+    name: str
+    # env: KEY=VALUE map for catalog entries that declare required env vars.
+    env: Dict[str, str] = {}
+    enable: bool = True
+
+
+@app.post("/api/mcp/catalog/install")
+async def install_mcp_catalog_entry(body: MCPCatalogInstall):
+    """Install a catalog MCP into config.yaml.
+
+    For HTTP/stdio entries with required env vars, those are written to .env
+    via the standard env path so the agent can read them at session start.
+    Entries that need a git bootstrap (``needs_install``) are installed via
+    the CLI action path because the clone can take time.
+    """
+    from hermes_cli import mcp_catalog
+
+    name = (body.name or "").strip()
+    entry = mcp_catalog.get_entry(name)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"No catalog entry '{name}'")
+
+    # Persist any supplied env vars first (catalog entries declare which names
+    # they need; we only write the ones the user provided).
+    if body.env:
+        for k, v in body.env.items():
+            if v:
+                save_env_value(k, v)
+
+    # Git-bootstrap entries can take a while to clone — run via the background
+    # action path so the request returns immediately and the UI can tail logs.
+    if entry.install is not None:
+        try:
+            proc = _spawn_hermes_action(["mcp", "install", name], "mcp-install")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Install failed: {exc}")
+        return {"ok": True, "name": name, "background": True, "action": "mcp-install"}
+
+    # No git step — install synchronously via the catalog API.
+    try:
+        await asyncio.to_thread(mcp_catalog.install_entry, entry, enable=body.enable)
+    except Exception as exc:
+        _log.exception("install_mcp_catalog_entry failed")
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "name": name, "background": False}
+
+
+# Register the mcp-install action log so /api/actions/mcp-install/status works.
+_ACTION_LOG_FILES.setdefault("mcp-install", "action-mcp-install.log")
+
+
 # ---------------------------------------------------------------------------
 # Pairing endpoints — approve / revoke / list messaging pairing codes.
 #
@@ -4274,6 +4476,8 @@ def _webhook_route_summary(name: str, route: Dict[str, Any], base_url: str) -> D
         "url": f"{base_url}/webhooks/{name}",
         # Secret is masked on read; full value only returned on create.
         "secret_set": bool(route.get("secret")),
+        # Default-enabled; only an explicit enabled:false turns a route off.
+        "enabled": route.get("enabled", True) is not False,
     }
 
 
@@ -4356,6 +4560,30 @@ async def delete_webhook(name: str):
     del subs[key]
     wh._save_subscriptions(subs)
     return {"ok": True}
+
+
+class WebhookEnabledToggle(BaseModel):
+    enabled: bool
+
+
+@app.put("/api/webhooks/{name}/enabled")
+async def set_webhook_enabled(name: str, body: WebhookEnabledToggle):
+    """Enable or disable a webhook route.
+
+    Disabled routes stay in the subscriptions file (so they can be
+    re-enabled) but the gateway rejects incoming events with 403.  The
+    gateway hot-reloads the subscriptions file, so this takes effect on the
+    next event without a restart.
+    """
+    import hermes_cli.webhook as wh
+
+    key = (name or "").strip().lower()
+    subs = wh._load_subscriptions()
+    if key not in subs:
+        raise HTTPException(status_code=404, detail=f"No subscription named '{key}'")
+    subs[key]["enabled"] = bool(body.enabled)
+    wh._save_subscriptions(subs)
+    return {"ok": True, "name": key, "enabled": bool(body.enabled)}
 
 
 # ---------------------------------------------------------------------------
@@ -4679,38 +4907,160 @@ async def run_import(body: ImportRequest):
 
 @app.get("/api/ops/hooks")
 async def list_hooks():
-    """Read-only list of configured shell hooks from config.yaml + allowlist."""
+    """List configured shell hooks from config.yaml with consent + health.
+
+    Reports each hook's allowlist (consent) status and whether the script is
+    currently executable, plus the set of valid hook events so the create
+    form can offer them.
+    """
+    from hermes_cli.config import load_config as _load_config
+    from agent import shell_hooks
+
+    try:
+        from hermes_cli.plugins import VALID_HOOKS
+        valid_events = sorted(VALID_HOOKS)
+    except Exception:
+        valid_events = []
+
+    specs = []
+    try:
+        specs = shell_hooks.iter_configured_hooks(_load_config())
+    except Exception:
+        _log.exception("iter_configured_hooks failed")
+
+    out = []
+    for spec in specs:
+        entry = None
+        try:
+            entry = shell_hooks.allowlist_entry_for(spec.event, spec.command)
+        except Exception:
+            pass
+        executable = False
+        try:
+            executable = shell_hooks.script_is_executable(spec.command)
+        except Exception:
+            pass
+        out.append({
+            "event": spec.event,
+            "matcher": spec.matcher,
+            "command": spec.command,
+            "timeout": spec.timeout,
+            "allowed": entry is not None,
+            "approved_at": (entry or {}).get("approved_at"),
+            "executable": executable,
+        })
+
+    return {"hooks": out, "valid_events": valid_events}
+
+
+class HookCreate(BaseModel):
+    event: str
+    command: str
+    matcher: Optional[str] = None
+    timeout: Optional[int] = None
+    # approve: write the consent allowlist entry too (the operator using the
+    # authenticated dashboard is giving consent). Without it the hook is
+    # configured but won't fire until approved.
+    approve: bool = True
+
+
+@app.post("/api/ops/hooks")
+async def create_hook(body: HookCreate):
+    """Add a shell hook to config.yaml (and optionally approve it).
+
+    Shell hooks run arbitrary commands, so this is a privileged action: it
+    writes to the ``hooks:`` config block and, when ``approve`` is set, records
+    consent in the allowlist so the hook actually fires.  Takes effect on the
+    next session / gateway restart.
+    """
+    from agent import shell_hooks
+
+    event = (body.event or "").strip()
+    command = (body.command or "").strip()
+    if not event or not command:
+        raise HTTPException(status_code=400, detail="event and command are required")
+
+    try:
+        from hermes_cli.plugins import VALID_HOOKS
+        if event not in VALID_HOOKS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown event '{event}'. Valid: {', '.join(sorted(VALID_HOOKS))}",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
     cfg = load_config()
     hooks_cfg = cfg.get("hooks")
-    out = []
-    if isinstance(hooks_cfg, dict):
-        for event, entries in hooks_cfg.items():
-            if not isinstance(entries, list):
-                continue
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                out.append({
-                    "event": event,
-                    "matcher": entry.get("matcher"),
-                    "command": entry.get("command"),
-                    "timeout": entry.get("timeout"),
-                })
-    # Consent allowlist status (which commands have been approved for run).
-    allowlist: List[str] = []
+    if not isinstance(hooks_cfg, dict):
+        hooks_cfg = {}
+        cfg["hooks"] = hooks_cfg
+    entries = hooks_cfg.get(event)
+    if not isinstance(entries, list):
+        entries = []
+        hooks_cfg[event] = entries
+
+    new_entry: Dict[str, Any] = {"command": command}
+    if body.matcher:
+        new_entry["matcher"] = body.matcher
+    if body.timeout is not None:
+        new_entry["timeout"] = int(body.timeout)
+    entries.append(new_entry)
+    save_config(cfg)
+
+    approved = False
+    if body.approve:
+        try:
+            shell_hooks._record_approval(event, command)
+            approved = True
+        except Exception:
+            _log.exception("hook consent record failed")
+
+    return {"ok": True, "event": event, "command": command, "approved": approved}
+
+
+class HookDelete(BaseModel):
+    event: str
+    command: str
+
+
+@app.delete("/api/ops/hooks")
+async def delete_hook(body: HookDelete):
+    """Remove a hook from config.yaml and revoke its consent allowlist entry."""
+    from agent import shell_hooks
+
+    event = (body.event or "").strip()
+    command = (body.command or "").strip()
+    if not event or not command:
+        raise HTTPException(status_code=400, detail="event and command are required")
+
+    cfg = load_config()
+    hooks_cfg = cfg.get("hooks")
+    removed = False
+    if isinstance(hooks_cfg, dict) and isinstance(hooks_cfg.get(event), list):
+        before = len(hooks_cfg[event])
+        hooks_cfg[event] = [
+            e for e in hooks_cfg[event]
+            if not (isinstance(e, dict) and e.get("command") == command)
+        ]
+        removed = len(hooks_cfg[event]) < before
+        if not hooks_cfg[event]:
+            del hooks_cfg[event]
+        if not hooks_cfg:
+            cfg.pop("hooks", None)
+        save_config(cfg)
+
+    # Revoke consent regardless so a re-add re-prompts.
     try:
-        allow_path = get_hermes_home() / "shell-hooks-allowlist.json"
-        if allow_path.exists():
-            data = json.loads(allow_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                allowlist = list(data.keys())
-            elif isinstance(data, list):
-                allowlist = [str(x) for x in data]
+        shell_hooks.revoke(command)
     except Exception:
-        _log.exception("Failed to read shell-hooks allowlist")
-    for h in out:
-        h["allowed"] = h.get("command") in allowlist
-    return {"hooks": out, "allowlist": allowlist}
+        pass
+
+    if not removed:
+        raise HTTPException(status_code=404, detail="No matching hook found")
+    return {"ok": True}
 
 
 @app.get("/api/ops/checkpoints")
