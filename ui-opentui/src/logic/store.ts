@@ -45,6 +45,9 @@ export interface ToolPartState {
   args?: Record<string, unknown>
   /** Tool wall-clock seconds (gateway `duration_s`), shown dim in the header. */
   duration?: number
+  /** Local Date.now() stamped on `tool.start` — drives the live elapsed tick
+   *  while running (Epic 2.5). `duration` (gateway truth) wins once settled. */
+  startedAt?: number
   /** Tidy note when the gateway truncated output (e.g. "5 lines / 234 chars"). */
   omittedNote?: string
   /** FULL raw unified diff from file-edit tools (gateway `diff_unified`, 512KB-capped). */
@@ -222,6 +225,29 @@ function readNum(payload: { readonly [k: string]: unknown }, key: string): numbe
 function readOptNum(payload: { readonly [k: string]: unknown }, key: string): number | undefined {
   const v = payload[key]
   return typeof v === 'number' ? v : undefined
+}
+
+/**
+ * A failed tool's failure signal, derived from the raw `result`: hermes tools
+ * return `{"error": "…"}` JSON on failure, and the gateway never sets a
+ * top-level `error` on tool.complete — so this is THE live trigger for the
+ * failed lifecycle state (Epic 2.5). Flattened to one line for the header
+ * subtitle; absent/empty/non-dict results yield undefined (not failed).
+ */
+function resultError(result: unknown): string | undefined {
+  let v: unknown = result
+  if (typeof v === 'string') {
+    try {
+      v = JSON.parse(v)
+    } catch {
+      return undefined
+    }
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined
+  const e = (v as Record<string, unknown>)['error']
+  if (typeof e !== 'string') return undefined
+  const flat = e.replace(/\s+/g, ' ').trim()
+  return flat ? flat.slice(0, 400) : undefined
 }
 
 /** Render a raw tool `result` for display: strings as-is, anything else pretty
@@ -632,7 +658,7 @@ export function createSessionStore() {
         setState(
           produce(draft => {
             const live = ensureAssistant(draft)
-            const part: ToolPartState = { type: 'tool', id, name, state: 'running' }
+            const part: ToolPartState = { type: 'tool', id, name, state: 'running', startedAt: Date.now() }
             if (argsPreview) part.argsPreview = argsPreview
             if (argsText) part.argsText = argsText
             ;(live.parts ??= []).push(part)
@@ -644,7 +670,9 @@ export function createSessionStore() {
         const id = readStr(event.payload, 'tool_id')
         if (!id) break
         const name = readStr(event.payload, 'name')
-        const error = readStr(event.payload, 'error')
+        // explicit payload error wins; else derive from the `{"error": …}` result
+        // convention (the only failure signal the live gateway actually ships).
+        const error = readStr(event.payload, 'error') ?? resultError(event.payload['result'])
         const summary = readStr(event.payload, 'summary')
         // `result_text` is verbose-gated, but the raw `result` is ALWAYS sent —
         // when the verbose text is absent, derive the display body from `result`

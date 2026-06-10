@@ -5,13 +5,18 @@
  * what's INSIDE varies per tool and is dispatched through the tool renderer
  * registry (`view/tools/registry.tsx`, Epic 2.2):
  *
+ *   ⚡ terminal  sleep 8  · 12s                   ← running (elapsed ticks live)
  *   ▶ terminal  ls -la src  · 0.3s  (12 lines)   ← collapsed (default)
  *   ▼ terminal  ls -la src  · 0.3s               ← expanded header
  *   │ <renderer body>                            ← labeled fields / output / …
+ *   ✗ terminal  ✗ exit 1  · 0.1s  (3 lines)      ← failed (error-colored glyph)
  *
- * `▶`/`▼` marks expandable tools; clicking the header toggles it (wrapped in
- * useScrollAnchor so expanding never yanks the viewport). Running tools show
- * `name …`. The header row is chrome (selectable=false) — a free-form drag
+ * Lifecycle is legible from the HEAD GLYPH alone (Epic 2.5): `⚡` running (with
+ * a live `· Ns` elapsed off the shared 1s tick in `elapsed.ts` — never a timer
+ * per part), `▶`/`▼` settled-expandable, `✗` failed (theme error color).
+ * Clicking an expandable header toggles it (wrapped in useScrollAnchor so
+ * expanding never yanks the viewport); running parts have no expand
+ * affordance. The header row is chrome (selectable=false) — a free-form drag
  * copies only the expanded body content. Fully themed (no hardcoded styles).
  */
 import { type ToolPartState } from '../logic/store.ts'
@@ -19,6 +24,7 @@ import { useDimensions } from './dimensions.tsx'
 import { createSignal, Show } from 'solid-js'
 
 import { truncate } from '../logic/toolOutput.ts'
+import { elapsedSeconds, useElapsedTick } from './elapsed.ts'
 import { useScrollAnchor } from './scrollAnchor.tsx'
 import { useSessionInfo } from './sessionInfo.tsx'
 import { useTheme } from './theme.tsx'
@@ -33,6 +39,31 @@ function fmtDuration(s: number): string {
   const m = Math.floor(s / 60)
   const r = Math.round(s % 60)
   return r ? `${m}m ${r}s` : `${m}m`
+}
+
+/** Live elapsed format — whole seconds (the tick advances 1s at a time). */
+function fmtElapsed(s: number): string {
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return r ? `${m}m ${r}s` : `${m}m`
+}
+
+/**
+ * Live `  · 12s` elapsed for a RUNNING part. Mounted only under the running
+ * `<Show>`, so its useElapsedTick subscription starts/stops the SHARED 1s
+ * interval with the part's lifecycle (the last cleanup clears it). Falls back
+ * to the plain ` …` marker when startedAt is unknown (e.g. a tool.complete
+ * that arrived without a local tool.start).
+ */
+function RunningElapsed(props: { startedAt: number | undefined }) {
+  const theme = useTheme()
+  const tick = useElapsedTick()
+  const text = () => {
+    tick() // re-read every shared tick — Date.now() alone is not reactive
+    return props.startedAt === undefined ? ' …' : `  · ${fmtElapsed(elapsedSeconds(props.startedAt))}`
+  }
+  return <span style={{ fg: theme().color.muted }}>{text()}</span>
 }
 
 export function ToolPart(props: { part: ToolPartState }) {
@@ -56,10 +87,14 @@ export function ToolPart(props: { part: ToolPartState }) {
   // Optional `+N −M` change summary (file tools) — themed, settled parts only.
   const stats = () => (running() || props.part.error ? undefined : renderer().stats?.(props.part))
 
-  const headGlyph = () => (collapsible() ? (expanded() ? '▼' : '▶') : '⚡')
+  // Failed parts are legible from the glyph alone: `✗` in the head position
+  // (error-colored), regardless of expandability — `(N lines)` still marks an
+  // expandable body. `error` only lands on tool.complete, so running stays ⚡.
+  const failed = () => !running() && Boolean(props.part.error)
+  const headGlyph = () => (failed() ? '✗' : collapsible() ? (expanded() ? '▼' : '▶') : '⚡')
   // accent glyph MARKS the tool (draws the eye); the rest is muted so tools read
   // as the dim, secondary tier below the bright assistant answer (Ink hierarchy).
-  const headColor = () => (props.part.error ? theme().color.error : theme().color.accent)
+  const headColor = () => (failed() ? theme().color.error : theme().color.accent)
   const subWidth = () => Math.max(1, bodyWidth() - props.part.name.length - 2)
 
   return (
@@ -80,10 +115,10 @@ export function ToolPart(props: { part: ToolPartState }) {
               never the header label. */}
           <text selectable={false}>
             <span style={{ fg: theme().color.muted }}>{props.part.name}</span>
-            <Show when={running()}>
-              <span style={{ fg: theme().color.muted }}> …</span>
-            </Show>
-            <Show when={!running() && subtitle()}>
+            {/* subtitle shows while running too (the gateway argsPreview — e.g.
+                the command being executed) so a running tool reads `⚡ terminal
+                sleep 8 · 12s`, Ink parity. */}
+            <Show when={subtitle()}>
               <span style={{ fg: props.part.error ? theme().color.error : theme().color.muted }}>
                 {`  ${truncate(subtitle(), subWidth())}`}
               </span>
@@ -105,6 +140,11 @@ export function ToolPart(props: { part: ToolPartState }) {
             </Show>
             <Show when={!running() && props.part.duration !== undefined}>
               <span style={{ fg: theme().color.muted }}>{`  · ${fmtDuration(props.part.duration ?? 0)}`}</span>
+            </Show>
+            {/* live elapsed (running only) — the <Show> scopes the shared-tick
+                subscription to the running lifecycle (see RunningElapsed). */}
+            <Show when={running()}>
+              <RunningElapsed startedAt={props.part.startedAt} />
             </Show>
             <Show when={collapsible() && !expanded() && lines().length > 1}>
               <span style={{ fg: theme().color.muted }}>{`  (${lines().length} lines)`}</span>

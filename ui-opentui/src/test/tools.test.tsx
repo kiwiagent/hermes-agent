@@ -9,7 +9,7 @@
  * (found by scanning the frame). The long-output cap is asserted at the Body
  * level (a tall frame would otherwise hide the trailing note).
  */
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { createSessionStore, type ToolPartState } from '../logic/store.ts'
 import { App } from '../view/App.tsx'
@@ -412,6 +412,153 @@ describe('file tool — output suppression under a rendered diff (no raw JSON, e
       const frame = await probe.waitForFrame(f => f.includes('trailing whitespace'))
       expect(frame).toContain('output') // labeled output section
       expect(frame).toContain('warning: trailing whitespace on line 3')
+    } finally {
+      probe.destroy()
+    }
+  })
+})
+
+describe('tool lifecycle states — running / done / failed (Epic 2.5)', () => {
+  // Fake ONLY setInterval/clearInterval/Date: the shared elapsed tick + the
+  // Date.now() it invalidates. setTimeout/microtasks stay REAL — the test
+  // renderer's settle dance (flush/waitForFrame) depends on them, and the
+  // render scheduler itself times via performance.now (unfaked).
+  const FAKED = ['setInterval', 'clearInterval', 'Date'] as const
+
+  test('store: tool.start stamps startedAt; tool.complete settles the gateway duration', () => {
+    vi.useFakeTimers({ toFake: [...FAKED] })
+    try {
+      vi.setSystemTime(1_750_000_000_000)
+      const store = createSessionStore()
+      store.apply({ type: 'gateway.ready' })
+      store.apply({ type: 'message.start' })
+      store.apply({ type: 'tool.start', payload: { tool_id: 'l1', name: 'terminal', context: 'sleep 8' } })
+      const live = store.state.messages[store.state.messages.length - 1]
+      const part = live?.parts?.find((p): p is ToolPartState => p.type === 'tool' && p.id === 'l1')
+      expect(part?.startedAt).toBe(1_750_000_000_000)
+      expect(part?.state).toBe('running')
+      // the gateway's duration_s remains the settled truth, startedAt untouched
+      store.apply({ type: 'tool.complete', payload: { tool_id: 'l1', name: 'terminal', duration_s: 8.2 } })
+      expect(part?.state).toBe('complete')
+      expect(part?.duration).toBe(8.2)
+      expect(part?.startedAt).toBe(1_750_000_000_000)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('store: a `{"error": …}` result derives part.error (the gateway never ships a top-level error)', () => {
+    const store = createSessionStore()
+    seedTool(
+      store,
+      { tool_id: 'l2', name: 'read_file' },
+      { tool_id: 'l2', name: 'read_file', result: { error: 'File not found:\n /nope.txt' } }
+    )
+    const last = store.state.messages[store.state.messages.length - 1]
+    const part = last?.parts?.find((p): p is ToolPartState => p.type === 'tool' && p.id === 'l2')
+    expect(part?.error).toBe('File not found: /nope.txt') // flattened to one line
+    // …and a clean result stays un-failed
+    seedTool(
+      store,
+      { tool_id: 'l3', name: 'terminal' },
+      { tool_id: 'l3', name: 'terminal', result: { exit_code: 0, output: 'ok' } }
+    )
+    const part3 = store.state.messages[store.state.messages.length - 1]?.parts?.find(
+      (p): p is ToolPartState => p.type === 'tool' && p.id === 'l3'
+    )
+    expect(part3?.error).toBeUndefined()
+  })
+
+  test('running tool shows ⚡ + a LIVE elapsed that advances with the clock — and no expand glyph', async () => {
+    vi.useFakeTimers({ toFake: [...FAKED] })
+    try {
+      const store = createSessionStore()
+      store.apply({ type: 'gateway.ready' })
+      store.apply({ type: 'message.start' })
+      store.apply({ type: 'tool.start', payload: { tool_id: 'r1', name: 'terminal', context: 'sleep 8' } })
+
+      const probe = await mountApp(store)
+      try {
+        const f0 = await probe.waitForFrame(f => f.includes('terminal'))
+        expect(f0).toContain('⚡') // running head glyph
+        expect(f0).toContain('sleep 8') // subtitle shows while running
+        expect(f0).toContain('· 0s') // elapsed starts at zero
+        expect(f0).not.toContain('▶') // NO expand affordance while running
+        expect(f0).not.toContain('▼')
+
+        vi.advanceTimersByTime(3000) // shared tick fires 3× → repaint
+        const f3 = await probe.waitForFrame(f => f.includes('· 3s'))
+        expect(f3).toContain('· 3s')
+        expect(f3).not.toContain('· 0s')
+
+        vi.advanceTimersByTime(9000) // …and keeps advancing (12s total)
+        const f12 = await probe.waitForFrame(f => f.includes('· 12s'))
+        expect(f12).toContain('· 12s')
+        expect(f12).toContain('⚡') // still running, still no ▶/▼
+        expect(f12).not.toContain('▶')
+      } finally {
+        probe.destroy()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('failed tool reads as failed from the HEAD GLYPH (✗) and stays expandable when there is a body', async () => {
+    const store = createSessionStore()
+    seedTool(
+      store,
+      { tool_id: 'e1', name: 'terminal', context: 'false' },
+      {
+        tool_id: 'e1',
+        name: 'terminal',
+        args: { command: 'false' },
+        error: 'exit status 1',
+        result_text: 'boom line one\nboom line two',
+        duration_s: 0.1
+      }
+    )
+
+    const probe = await mountApp(store)
+    try {
+      const frame = await probe.waitForFrame(f => f.includes('terminal'))
+      const row = frame.split('\n').find(line => line.includes('terminal')) ?? ''
+      // ✗ IN the head-glyph position (immediately before the name, after the
+      // assistant row's `⚕` gutter), replacing the expand glyph…
+      expect(row).toContain('✗ terminal')
+      expect(row).not.toContain('▶')
+      expect(row).toContain('✗ exit status 1') // error subtitle stays
+      expect(row).toContain('(2 lines)') // body presence still signposted
+
+      await clickHeader(probe, 'terminal') // still expandable: body has the output
+      const expanded = await probe.waitForFrame(f => f.includes('boom line one'))
+      expect(expanded).toContain('boom line one')
+      expect(expanded).toContain('boom line two')
+    } finally {
+      probe.destroy()
+    }
+  })
+
+  test('settled success keeps the ▶/▼ + duration contract (glyph never error-colored ✗)', async () => {
+    const store = createSessionStore()
+    seedTool(
+      store,
+      { tool_id: 'k1', name: 'terminal', context: 'ls' },
+      { tool_id: 'k1', name: 'terminal', args: { command: 'ls' }, result_text: 'a\nb', duration_s: 0.3 }
+    )
+
+    const probe = await mountApp(store)
+    try {
+      const frame = await probe.waitForFrame(f => f.includes('terminal'))
+      const row = frame.split('\n').find(line => line.includes('terminal')) ?? ''
+      expect(row).toContain('▶ terminal') // head-glyph position, after the ⚕ gutter
+      expect(row).toContain('· 0.3s')
+      expect(row).not.toContain('✗')
+      expect(row).not.toContain('⚡')
+
+      await clickHeader(probe, 'terminal')
+      const expanded = await probe.waitForFrame(f => f.includes('▼'))
+      expect(expanded).toContain('▼ terminal')
     } finally {
       probe.destroy()
     }
