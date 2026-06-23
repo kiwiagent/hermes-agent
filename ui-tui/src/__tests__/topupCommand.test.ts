@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getOverlayState, resetOverlayState } from '../app/overlayStore.js'
-import { billingCommands } from '../app/slash/commands/billing.js'
+import { topupCommands } from '../app/slash/commands/topup.js'
 import type { BillingStateResponse } from '../gatewayTypes.js'
 
 vi.mock('../lib/openExternalUrl.js', () => ({
   openExternalUrl: vi.fn(() => true)
 }))
 
-const billingCommand = billingCommands.find(cmd => cmd.name === 'billing')!
+const topupCommand = topupCommands.find(cmd => cmd.name === 'topup')!
 
 const ownerState = (overrides: Partial<BillingStateResponse> = {}): BillingStateResponse => ({
   auto_reload: {
@@ -72,7 +72,7 @@ const buildCtx = (results: Record<string, unknown>) => {
   }
 
   const run = async (arg: string) => {
-    billingCommand.run(arg, ctx as any, 'billing')
+    topupCommand.run(arg, ctx as any, 'topup')
     await rpc.mock.results[0]?.value
     await Promise.resolve()
     await Promise.resolve()

@@ -196,7 +196,7 @@ function OverviewScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
   return (
     <Box flexDirection="column">
       <Text bold color={t.color.accent}>
-        Usage credits
+        Top up credits
       </Text>
       {bar && <Text color={t.color.text}>{bar}</Text>}
       <Text color={t.color.text}>Balance: {s.balance_display}</Text>

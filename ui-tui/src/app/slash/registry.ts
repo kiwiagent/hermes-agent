@@ -1,5 +1,5 @@
 import { coreCommands } from './commands/core.js'
-import { billingCommands } from './commands/billing.js'
+import { topupCommands } from './commands/topup.js'
 import { creditsCommands } from './commands/credits.js'
 import { debugCommands } from './commands/debug.js'
 import { opsCommands } from './commands/ops.js'
@@ -9,7 +9,7 @@ import type { SlashCommand } from './types.js'
 
 export const SLASH_COMMANDS: SlashCommand[] = [
   ...coreCommands,
-  ...billingCommands,
+  ...topupCommands,
   ...creditsCommands,
   ...sessionCommands,
   ...opsCommands,
