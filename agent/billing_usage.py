@@ -136,14 +136,6 @@ class UsageModel:
     topup_bar: Optional[UsageBar] = None
 
     @property
-    def is_low(self) -> bool:
-        return self.status == "low"
-
-    @property
-    def is_free(self) -> bool:
-        return self.status == "free"
-
-    @property
     def has_topup(self) -> bool:
         return bool(self.topup_remaining_usd and self.topup_remaining_usd > 0)
 
