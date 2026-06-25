@@ -92,16 +92,12 @@ const overlay = (screen: BillingOverlayState['screen']): BillingOverlayState => 
 })
 
 describe('BillingOverlay — step-up screen (Enable terminal billing)', () => {
-  it('renders the one-time-setup prompt with the held amount', () => {
+  it('renders the one-time-setup prompt with the held amount, never leaking the raw scope', () => {
     const out = render(overlay('stepup'))
     expect(out).toContain('One-time setup')
     expect(out).toContain('Enable terminal billing')
-    expect(out).toContain('$100')          // resumes the held purchase
+    expect(out).toContain('$100') // resumes the held purchase
     expect(out).toContain('Not now')
-  })
-
-  it('NEVER leaks the raw billing:manage scope in copy', () => {
-    const out = render(overlay('stepup'))
     expect(out).not.toContain('billing:manage')
   })
 })

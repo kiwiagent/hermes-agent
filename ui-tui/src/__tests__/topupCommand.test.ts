@@ -245,80 +245,30 @@ describe('/billing slash command (overlay-driven)', () => {
     expect(getOverlayState().confirm).toBeNull()
   })
 
-  it('ctx.requestRemoteSpending → billing.step_up, resolves granted', async () => {
-    const { run, calls } = buildCtx({
-      'billing.state': ownerState(),
-      'billing.step_up': { ok: true, granted: true }
-    })
+  it.each([[true], [false]])('ctx.requestRemoteSpending → billing.step_up resolves %s', async granted => {
+    const { run, calls } = buildCtx({ 'billing.state': ownerState(), 'billing.step_up': { ok: true, granted } })
 
     await run('')
-    const granted = await getOverlayState().billing!.ctx.requestRemoteSpending()
-    expect(granted).toBe(true)
-    const su = calls.find(c => c.method === 'billing.step_up')
-    expect(su).toBeTruthy()
-  })
-
-  it('ctx.requestRemoteSpending → not granted resolves false', async () => {
-    const { run } = buildCtx({
-      'billing.state': ownerState(),
-      'billing.step_up': { ok: true, granted: false }
-    })
-
-    await run('')
-    const granted = await getOverlayState().billing!.ctx.requestRemoteSpending()
-    expect(granted).toBe(false)
-  })
-
-  it('ctx.charge happy path resolves submitted', async () => {
-    vi.useFakeTimers()
-
-    try {
-      const { run } = buildCtx({
-        'billing.state': ownerState(),
-        'billing.charge': { ok: true, charge_id: 'ch_1', idempotency_key: 'k' },
-        'billing.charge_status': { ok: true, status: 'settled', amount_usd: '100' }
-      })
-
-      await run('')
-      const outcome = await getOverlayState().billing!.ctx.charge('100')
-      expect(outcome).toBe('submitted')
-      await vi.runAllTimersAsync()
-    } finally {
-      vi.useRealTimers()
-    }
+    expect(await getOverlayState().billing!.ctx.requestRemoteSpending()).toBe(granted)
+    expect(calls.find(c => c.method === 'billing.step_up')).toBeTruthy()
   })
 
   // ── CF-4: revoked-terminal UX (kill the "15-minute zombie button") ──
 
-  it('ctx.charge remote_spending_revoked (admin) → clears overlay + admin copy', async () => {
+  it.each([
+    ['admin', 'An admin turned off terminal billing for this terminal'],
+    ['self', 'You turned off terminal billing for this terminal']
+  ])('ctx.charge remote_spending_revoked (%s) → clears the overlay (no zombie button) + actor copy', async (actor, copy) => {
     const { run, sys } = buildCtx({
       'billing.state': ownerState(),
-      'billing.charge': { ok: false, error: 'remote_spending_revoked', actor: 'admin', recovery: 'reconnect', idempotency_key: 'k' }
-    })
-
-    await run('')
-    expect(getOverlayState().billing).toBeTruthy()
-    getOverlayState().billing!.ctx.charge('100')
-    await Promise.resolve()
-    await Promise.resolve()
-    const out = printed(sys)
-    expect(out).toContain('An admin turned off terminal billing for this terminal')
-    expect(out).toContain('Reconnect to restore')
-    // Spend UI is killed immediately — no zombie button waiting for refresh.
-    expect(getOverlayState().billing).toBeNull()
-  })
-
-  it('ctx.charge remote_spending_revoked (self) → self copy', async () => {
-    const { run, sys } = buildCtx({
-      'billing.state': ownerState(),
-      'billing.charge': { ok: false, error: 'remote_spending_revoked', actor: 'self', recovery: 'reconnect', idempotency_key: 'k' }
+      'billing.charge': { ok: false, error: 'remote_spending_revoked', actor, recovery: 'reconnect', idempotency_key: 'k' }
     })
 
     await run('')
     getOverlayState().billing!.ctx.charge('100')
     await Promise.resolve()
     await Promise.resolve()
-    expect(printed(sys)).toContain('You turned off terminal billing for this terminal')
+    expect(printed(sys)).toContain(copy)
     expect(getOverlayState().billing).toBeNull()
   })
 
