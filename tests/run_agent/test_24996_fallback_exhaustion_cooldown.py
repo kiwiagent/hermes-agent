@@ -67,10 +67,16 @@ class TestExhaustionArmsCooldown:
             assert agent._try_activate_fallback() is True   # -> entry 1
             # Chain now exhausted; a non-rate-limit failure must arm cooldown.
             assert agent._try_activate_fallback() is False
+        after = time.monotonic()
         cooldown = getattr(agent, "_rate_limited_until", 0)
         assert cooldown > before
         # Cooldown is the short exhaustion window, not the 60s rate-limit one.
-        assert cooldown <= before + _FALLBACK_EXHAUSTED_COOLDOWN_S + 1.0
+        # Anchor the upper bound to `after` (captured once the cooldown has
+        # actually been armed) rather than `before`: the activation calls above
+        # can take >1s on a loaded CI worker, and the cooldown is set relative
+        # to the time of the *final* call, not `before`. A small slack absorbs
+        # scheduling jitter without weakening the "short window, not 60s" check.
+        assert cooldown <= after + _FALLBACK_EXHAUSTED_COOLDOWN_S + 1.0
 
     def test_no_chain_does_not_arm_cooldown(self):
         """An empty chain (no fallback configured) must not arm a cooldown —
