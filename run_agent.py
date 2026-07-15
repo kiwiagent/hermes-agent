@@ -207,6 +207,7 @@ from agent.tool_dispatch_helpers import (
     _append_subdir_hint_to_multimodal,  # noqa: F401  # re-exported for tests that `from run_agent import _append_subdir_hint_to_multimodal`
     _extract_file_mutation_targets,
     _extract_landed_file_mutation_paths,
+    _resolve_mutation_target,
     _extract_error_preview,
     _trajectory_normalize_msg,  # noqa: F401  # re-exported for tests that `from run_agent import _trajectory_normalize_msg`
 )
@@ -2890,6 +2891,7 @@ class AIAgent:
         args: Dict[str, Any],
         result: Any,
         is_error: bool,
+        task_id: str = "default",
     ) -> None:
         """Record a ``write_file`` / ``patch`` outcome for the turn-end verifier.
 
@@ -2898,6 +2900,13 @@ class AIAgent:
         model recovered within the turn).  Silently no-ops if the per-turn
         state dict hasn't been initialised yet (e.g. a tool dispatched
         outside ``run_conversation``).
+
+        Paths are resolved to absolute form via ``_resolve_mutation_target``
+        before being used as dict keys.  A raw relative path is a poor
+        identity key: if the terminal cwd changes between two mutations, the
+        same relative path (``"bar.py"``) can resolve to different absolute
+        files (``/repo/foo/bar.py`` vs ``/repo/bar.py``), causing failure
+        entries to collide and silently drop or falsely clear.
         """
         if tool_name not in _FILE_MUTATING_TOOLS:
             return
@@ -2907,6 +2916,10 @@ class AIAgent:
         targets = _extract_file_mutation_targets(tool_name, args)
         if not targets:
             return
+        # Resolve to absolute paths so the dict key is a stable file identity,
+        # not a cwd-dependent relative string.  Falls back to the raw path
+        # on resolution failure.
+        targets = [_resolve_mutation_target(p, task_id) for p in targets]
         landed = file_mutation_result_landed(tool_name, result)
         if landed:
             changed = getattr(self, "_turn_file_mutation_paths", None)

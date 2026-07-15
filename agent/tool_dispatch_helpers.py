@@ -380,6 +380,30 @@ def _extract_landed_file_mutation_paths(
     return targets
 
 
+def _resolve_mutation_target(path: str, task_id: str) -> str:
+    """Resolve a raw file-mutation target to its absolute path.
+
+    The verifier stores per-path failure entries keyed by *identity*.  A raw
+    relative path from the model's tool args is a poor identity key: if the
+    terminal cwd changes between two mutations, the same relative path
+    (``"bar.py"``) can resolve to different absolute files
+    (``/repo/foo/bar.py`` vs ``/repo/bar.py``).  That collision silently
+    drops failures or falsely clears them.
+
+    Resolving against the task's workspace root — the same function the file
+    tools themselves use — gives a stable identity.  The cwd is guaranteed
+    stable between tool execution and this record call because file
+    mutations don't ``cd``.  Falls back to the raw path on any resolution
+    failure so the verifier degrades gracefully instead of crashing.
+    """
+    try:
+        from tools.file_tools import _resolve_path_for_task
+
+        return str(_resolve_path_for_task(path, task_id))
+    except Exception:
+        return path
+
+
 def _extract_error_preview(result: Any, max_len: int = 180) -> str:
     """Pull a one-line error summary out of a tool result for footer display."""
     text = _multimodal_text_summary(result) if result is not None else ""
@@ -620,6 +644,7 @@ __all__ = [
     "_append_subdir_hint_to_multimodal",
     "_extract_file_mutation_targets",
     "_extract_landed_file_mutation_paths",
+    "_resolve_mutation_target",
     "_extract_error_preview",
     "_trajectory_normalize_msg",
     "make_tool_result_message",

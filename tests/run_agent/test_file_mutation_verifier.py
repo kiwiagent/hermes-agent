@@ -257,6 +257,58 @@ class TestRecordFileMutationResult:
         # the initial root cause.
         assert "first error" in agent._turn_failed_file_mutations["/tmp/a.md"]["error_preview"]
 
+    def test_relative_path_resolved_to_absolute(self):
+        """The verifier must resolve relative paths to absolute form before
+        using them as dict keys, so the same relative path can't collide
+        when the terminal cwd changes between two mutations.
+
+        Regression: without resolution, ``patch bar.py`` failing in
+        ``/repo/foo`` then succeeding in ``/repo`` would pop the original
+        failure because both used the raw key ``"bar.py"`` — even though
+        they targeted different files.
+        """
+        agent = _bare_agent()
+
+        # Simulate the resolution layer: ``bar.py`` resolves differently
+        # depending on the (simulated) terminal cwd at call time.
+        import run_agent as _ra
+        _orig = _ra._resolve_mutation_target
+
+        _call = {"n": 0}
+
+        def _fake_resolve(path, task_id):
+            _call["n"] += 1
+            if _call["n"] == 1:
+                return "/repo/foo/bar.py"
+            return "/repo/bar.py"
+
+        try:
+            _ra._resolve_mutation_target = _fake_resolve
+
+            # 1. patch bar.py fails while cwd=/repo/foo
+            agent._record_file_mutation_result(
+                "patch", {"mode": "replace", "path": "bar.py", "old_string": "x", "new_string": "y"},
+                json.dumps({"error": "not found"}), is_error=True,
+                task_id="default",
+            )
+            assert "/repo/foo/bar.py" in agent._turn_failed_file_mutations
+
+            # 2. cd .. → cwd=/repo, patch bar.py succeeds on a DIFFERENT file.
+            #    The raw-path key ``"bar.py"`` would have falsely cleared the
+            #    first failure.  With resolution, the keys differ and the
+            #    original failure survives.
+            agent._record_file_mutation_result(
+                "patch", {"mode": "replace", "path": "bar.py", "old_string": "x", "new_string": "y"},
+                json.dumps({"success": True, "files_modified": ["/repo/bar.py"]}),
+                is_error=False,
+                task_id="default",
+            )
+            assert "/repo/foo/bar.py" in agent._turn_failed_file_mutations, (
+                "success on a different absolute file must NOT clear the original failure"
+            )
+        finally:
+            _ra._resolve_mutation_target = _orig
+
     def test_v4a_multi_file_all_tracked(self):
         agent = _bare_agent()
         body = (
