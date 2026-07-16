@@ -15,9 +15,10 @@ This is an implementation checklist, not a record that the phases are complete. 
   - Covered: Rust `walkdir_inner` now uses `entry.file_type()` (lstat, non-following) to skip symlinks. Tests on both sides: `test_verify_bundle_with_symlinks` (Rust) + `test_bundle_with_file_symlink_verifies` (Python).
   - Spec: `01-phase0-bundles.md:271-280`.
 
-- [ ] Validate signed manifest identity before activation.
-  - Assert `manifest.platform == current_platform()`, requested channel compatibility, valid version/path components, and expected archive identity.
-  - Current apply only checks the version at `apps/hermes-launcher/src/apply.rs:42-49`.
+- [x] Validate signed manifest identity before activation.
+  - `validate_manifest_identity()` in `apply.rs` asserts platform, channel, version path safety, and version match after signature verification, before preflight.
+  - Tests: 5 new covering happy path, platform/channel/version mismatch, path-traversal rejection.
+  - Spec: `01-phase0-bundles.md:248-280`.
 
 - [ ] Make signing fail closed in the canonical manifest writer.
   - `scripts/release/write-manifest.py:165-169,287-288` exits successfully when PyNaCl is absent.
