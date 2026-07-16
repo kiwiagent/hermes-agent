@@ -1,3 +1,4 @@
+mod adopt;
 mod cli;
 mod launch;
 mod release;
@@ -92,12 +93,20 @@ fn status(check: bool, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn adopt(
-    _from_checkout: Option<String>,
-    _source: Option<String>,
-    _undo: bool,
-) -> anyhow::Result<()> {
-    todo!("adopt: migrate legacy checkout to slots (phase 2)")
+fn adopt(from_checkout: Option<String>, source: Option<String>, undo: bool) -> anyhow::Result<()> {
+    let hermes_home = dirs::home_dir()
+        .context("cannot find home directory")?
+        .join(".hermes");
+
+    let checkout = match from_checkout {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            // Default to the current checkout (PROJECT_ROOT)
+            std::path::PathBuf::from(".")
+        }
+    };
+
+    adopt::adopt(&hermes_home, &checkout, source.as_deref(), undo)
 }
 
 fn self_restage() -> anyhow::Result<()> {
