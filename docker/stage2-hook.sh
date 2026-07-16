@@ -19,6 +19,9 @@ set -eu
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 INSTALL_DIR="/opt/hermes"
+# Resolve all runtime and app paths from the active immutable slot.
+# shellcheck disable=SC1091
+. /opt/docker/slot-env.sh
 
 # Drop to hermes via s6-setuidgid, but skip it when already non-root.
 as_hermes() { [ "$(id -u)" = 0 ] || { "$@"; return; }; s6-setuidgid hermes "$@"; }
@@ -426,7 +429,7 @@ fi
 # after first-boot seeding and before supervised gateway services start.
 # Set HERMES_SKIP_CONFIG_MIGRATION=1 for controlled/manual migrations.
 if [ -f "$HERMES_HOME/config.yaml" ]; then
-    s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/docker_config_migrate.py" \
+    s6-setuidgid hermes "$HERMES_SLOT_PYTHON" "$HERMES_SLOT_ROOT/app/scripts/docker_config_migrate.py" \
         || echo "[stage2] Warning: docker_config_migrate.py failed; continuing"
 fi
 
@@ -462,8 +465,8 @@ if [ -f "$HERMES_HOME/auth.json" ] && [ -n "${HERMES_AUTH_JSON_REBOOTSTRAP:-}" ]
     if refuse_symlinked_path "reseed" "$HERMES_HOME/auth.json"; then
         :
     else
-        s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" \
-            "$INSTALL_DIR/scripts/docker_rebootstrap_nous_session.py" \
+        s6-setuidgid hermes "$HERMES_SLOT_PYTHON" \
+            "$HERMES_SLOT_ROOT/app/scripts/docker_rebootstrap_nous_session.py" \
             "$HERMES_HOME/auth.json" \
             || echo "[stage2] Warning: docker_rebootstrap_nous_session.py failed; continuing"
     fi
@@ -511,14 +514,14 @@ fi
 # skills_sync.py doesn't depend on any environment exports beyond what
 # the python binary's own bin-stub already sets up (sys.path is rooted
 # at the venv's site-packages by virtue of running .venv/bin/python).
-if [ -d "$INSTALL_DIR/skills" ]; then
-    as_hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/tools/skills_sync.py" \
+if [ -d "$HERMES_SLOT_ROOT/app/skills" ]; then
+    as_hermes "$HERMES_SLOT_PYTHON" -m tools.skills_sync \
         || echo "[stage2] Warning: skills_sync.py failed; continuing"
 fi
 
 # --- Discover agent-browser's Chromium binary ---
-# The image's Dockerfile runs `npx playwright install chromium`, which
-# populates ``$PLAYWRIGHT_BROWSERS_PATH`` (=/opt/hermes/.playwright) with
+# On-demand browser setup populates ``$PLAYWRIGHT_BROWSERS_PATH``
+# (=/opt/data/ms-playwright) with
 # a ``chromium_headless_shell-<build>/chrome-headless-shell-linux64/``
 # directory. agent-browser (the runtime CLI Hermes spawns for the
 # browser tool) doesn't recognise this layout in its own cache scan and
@@ -540,8 +543,7 @@ fi
 #   PR #18635's earlier ``find | grep -Ei 'chrome|chromium'`` which would
 #   match the path ``.../chrome-headless-shell-linux64/libGLESv2.so`` and
 #   pick a .so.
-# - Quietly skipped when $PLAYWRIGHT_BROWSERS_PATH doesn't exist (e.g.
-#   custom builds that strip Playwright).
+# - Quietly skipped before the on-demand browser runtime has been installed.
 if [ -z "${AGENT_BROWSER_EXECUTABLE_PATH:-}" ] && \
         [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ] && \
         [ -d "$PLAYWRIGHT_BROWSERS_PATH" ]; then

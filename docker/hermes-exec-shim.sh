@@ -19,18 +19,18 @@
 #
 # Fix
 # ---
-# This shim sits at /opt/hermes/bin/hermes and is placed earliest on PATH.
+# This shim sits at /usr/local/bin/hermes and is placed earliest on PATH.
 # When invoked as root, it drops to the hermes user (via s6-setuidgid)
-# before exec'ing the real venv binary, so anything that writes under
+# before exec'ing the preserved native stable launcher, so anything that writes under
 # $HERMES_HOME is uid-aligned with the supervised processes. When invoked
 # as any non-root UID — including the supervised processes themselves,
 # `docker exec --user hermes`, kanban subagents, etc. — it short-circuits
-# straight to the venv binary with no privilege change. Net: one extra
+# straight to the native launcher with no privilege change. Net: one extra
 # fork on the docker-exec-as-root path, zero behavioral change on every
 # other path.
 #
-# Recursion safety: the shim exec's the venv binary by *absolute path*
-# (/opt/hermes/.venv/bin/hermes), so the second hop cannot re-enter this
+# Recursion safety: the shim exec's the native launcher by *absolute path*
+# (/opt/hermes/bin/hermes), so the second hop cannot re-enter this
 # shim regardless of PATH state. No sentinel env var needed.
 #
 # Opt-out: set HERMES_DOCKER_EXEC_AS_ROOT=1 (1/true/yes, case-insensitive)
@@ -40,9 +40,9 @@
 
 set -e
 
-REAL=/opt/hermes/.venv/bin/hermes
+REAL=/opt/hermes/bin/hermes
 
-# Defensive: if the venv binary is missing (corrupted image, partial
+# Defensive: if the native launcher is missing (corrupted image, partial
 # install), fail loudly rather than silently masking it.
 if [ ! -x "$REAL" ]; then
     echo "hermes-shim: $REAL not found or not executable" >&2

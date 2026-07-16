@@ -15,13 +15,11 @@ def _dockerfile_text() -> str:
 def test_dockerfile_makes_opt_hermes_readonly_for_hermes_user() -> None:
     text = _dockerfile_text()
 
-    # --chmod on the source COPY bakes read-only perms at copy time instead
-    # of a separate chmod -R pass (which walked ~30k files — #49113).
-    assert "COPY --link --chmod=a+rX,go-w . ." in text
-    # The old tree-walking passes must not be present.
-    assert "chown -R root:root /opt/hermes" not in text
-    assert "chmod -R a+rX /opt/hermes" not in text
-    assert "chmod -R a-w /opt/hermes" not in text
+    # The complete release bundle is copied into a root-owned managed slot,
+    # then sealed against writes by the runtime user.
+    assert "COPY --from=bundle / /opt/hermes/versions/docker/" in text
+    assert "chmod -R a+rX,go-w /opt/hermes" in text
+    assert "chown -R hermes:hermes /opt/hermes" not in text
 
 
 def test_dockerfile_keeps_mutable_state_under_opt_data() -> None:
@@ -37,7 +35,7 @@ def test_dockerfile_disables_runtime_install_mutations() -> None:
 
     assert "ENV PYTHONDONTWRITEBYTECODE=1" in text
     assert "ENV HERMES_DISABLE_LAZY_INSTALLS=1" in text
-    assert "HERMES_TUI_DIR=/opt/hermes/ui-tui" in text
+    assert "HERMES_TUI_DIR=/opt/hermes/versions/docker/ui/tui" in text
 
 
 def test_dockerfile_does_not_chown_install_trees_to_hermes() -> None:
@@ -66,16 +64,7 @@ def test_dockerfile_bakes_code_scoped_install_method_stamp() -> None:
     user can't modify it (go-w from the --chmod on the source COPY).
     """
     text = _dockerfile_text()
-    assert "printf 'docker\\n' > /opt/hermes/.install_method" in text
-
-    # The stamp must be in the RUN block that wires the exec shim.
-    shim_block = re.search(
-        r"RUN mkdir -p /opt/hermes/bin && \\\n"
-        r"(?:.*\\\n)+?"
-        r"\s+printf 'docker\\n' > /opt/hermes/\.install_method",
-        text,
-    )
-    assert shim_block, "install-method stamp must be in the shim-wiring RUN block"
+    assert "printf 'docker\\n' > /opt/hermes/versions/docker/.install_method" in text
 
 
 def test_dockerfile_redirects_lazy_installs_to_durable_target() -> None:
