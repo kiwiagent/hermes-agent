@@ -7905,10 +7905,10 @@ def _(rid, params: dict) -> dict:
 def _serialize_billing_error(exc) -> dict:
     """Map a BillingError into the result.error envelope the TUI branches on."""
     from hermes_cli.nous_billing import (
-        BillingRateLimited,
         BillingRemoteSpendingRevoked,
         BillingScopeRequired,
         BillingSessionRevoked,
+        BillingTransient,
     )
 
     kind = "error"
@@ -7918,7 +7918,7 @@ def _serialize_billing_error(exc) -> dict:
         kind = "session_revoked"
     elif isinstance(exc, BillingScopeRequired):
         kind = "insufficient_scope"
-    elif isinstance(exc, BillingRateLimited):
+    elif isinstance(exc, BillingTransient):
         kind = str(exc.error) if getattr(exc, "error", None) else "rate_limited"
     elif getattr(exc, "error", None):
         kind = str(exc.error)

@@ -176,10 +176,15 @@ class BillingState:
     def can_charge(self) -> bool:
         """True when the UI should offer charge/auto-reload actions.
 
-        Admin role AND the per-org kill-switch on. (The server still enforces;
-        this is just for graying out actions the user can't take.)
+        Uses the server-granted plan-change capability (``can_change_plan``,
+        which itself falls back to the legacy OWNER/ADMIN role check when the
+        server omits ``canChangePlan``) AND the per-org kill-switch. This lets
+        the server grant charge capability to non-OWNER/ADMIN roles (e.g.
+        FINANCE_ADMIN) via ``canChangePlan``, instead of hard-coding the
+        deprecated 3-role admin check. (The server still enforces; this is
+        just for graying out actions the user can't take.)
         """
-        return self.is_admin and self.cli_billing_enabled
+        return self.can_change_plan and self.cli_billing_enabled
 
 
 def _parse_card(raw: Any) -> Optional[CardInfo]:

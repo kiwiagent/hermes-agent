@@ -16,7 +16,7 @@ import type {
 } from '../gatewayTypes.js'
 import type { Theme } from '../theme.js'
 
-import { ActionRow, footer, MenuRow, UsageBars } from './overlayPrimitives.js'
+import { ActionRow, footer, MenuRow, type MenuRowSpec, UsageBars, useMenu } from './overlayPrimitives.js'
 
 const UPGRADE_CONFIRM_INTERVAL_MS = 2000
 const UPGRADE_CONFIRM_ATTEMPTS = 15
@@ -70,48 +70,6 @@ interface ScreenProps {
   t: Theme
 }
 
-/** A selectable menu row with its action. */
-interface Row {
-  color?: string
-  label: string
-  run: () => void
-}
-
-interface SubscriptionResultWithPending extends SubscriptionResult {
-  pendingTierId?: null | string
-}
-
-/** ↑/↓ + Enter + number-key selection over `rows`; Esc runs `onEscape`. */
-function useMenu(rows: Row[], onEscape: () => void): number {
-  const [sel, setSel] = useState(0)
-
-  useInput((ch, key) => {
-    if (key.escape) {
-      return onEscape()
-    }
-
-    if (key.upArrow && sel > 0) {
-      setSel(v => v - 1)
-    }
-
-    if (key.downArrow && sel < rows.length - 1) {
-      setSel(v => v + 1)
-    }
-
-    if (key.return) {
-      return rows[sel]?.run()
-    }
-
-    const n = parseInt(ch, 10)
-
-    if (n >= 1 && n <= rows.length) {
-      return rows[n - 1]?.run()
-    }
-  })
-
-  return Math.min(sel, Math.max(0, rows.length - 1))
-}
-
 /** ISO datetime → YYYY-MM-DD for display, or a soft fallback. */
 function shortDate(iso?: null | string): string {
   return iso && iso.length >= 10 ? iso.slice(0, 10) : 'the end of the billing period'
@@ -145,7 +103,7 @@ function mutationResult(r: null | { message?: string; ok?: boolean }, okMessage:
 }
 
 /** Map an upgrade response, routing SCA / decline to a portal recovery. */
-function upgradeResult(r: null | SubscriptionUpgradeResponse, pendingTierId?: null | string): SubscriptionResultWithPending {
+function upgradeResult(r: null | SubscriptionUpgradeResponse, pendingTierId?: null | string): SubscriptionResult {
   if (!r) {
     // null = a transport failure (WS drop / request timeout) on the CHARGING
     // route — NAS may have already prorated + charged. Report it as ambiguous and
@@ -425,7 +383,7 @@ function OverviewScreen({ onClose, onPatch, overlay, t }: ScreenProps) {
     void resumeAndRoute(ctx, onPatch)
   }
 
-  const rows: Row[] = []
+  const rows: MenuRowSpec[] = []
 
   if (canChange) {
     // When a change is already scheduled, undo is the most likely next intent —
@@ -529,7 +487,7 @@ function PickerScreen({ onPatch, overlay, t }: ScreenProps) {
 
   const back = () => onPatch({ screen: 'overview' })
 
-  const rows: Row[] = choices.map(tier => {
+  const rows: MenuRowSpec[] = choices.map(tier => {
     const direction = tier.tier_order > currentOrder ? 'upgrade' : 'downgrade'
 
     return {
@@ -631,7 +589,7 @@ function ConfirmScreen({ onClose, onPatch, overlay, t }: ScreenProps) {
   const amount = centsDisplay(preview?.amount_due_now_cents)
   const targetName = isCancellation ? null : (preview?.target_tier_name ?? 'the selected plan')
 
-  let primary: null | Row = null
+  let primary: MenuRowSpec | null = null
 
   if (isCancellation) {
     primary = { color: t.color.warn, label: 'Cancel subscription', run: apply }
@@ -643,7 +601,7 @@ function ConfirmScreen({ onClose, onPatch, overlay, t }: ScreenProps) {
     primary = { label: 'Manage on portal', run: manage }
   }
 
-  const rows: Row[] = primary ? [primary, { label: 'Back', run: back }] : [{ label: 'Back', run: back }]
+  const rows: MenuRowSpec[] = primary ? [primary, { label: 'Back', run: back }] : [{ label: 'Back', run: back }]
   const sel = useMenu(rows, back)
   // Chip contrasts an immediate charge vs a period-end schedule at a glance.
   const chip = effect === 'charge_now' ? { color: t.color.ok, label: 'charged now' } : effect === 'scheduled' ? { color: t.color.warn, label: 'scheduled · not today' } : null
@@ -717,7 +675,7 @@ function ConfirmScreen({ onClose, onPatch, overlay, t }: ScreenProps) {
 
 function ResultScreen({ onClose, overlay, t }: Omit<ScreenProps, 'onPatch'>) {
   const { ctx } = overlay
-  const result = (overlay.result ?? null) as null | SubscriptionResultWithPending
+  const result = overlay.result ?? null
   const recoveryUrl = result?.recoveryUrl ?? null
   const pendingTierId = result?.pendingTierId ?? null
   const [applyState, setApplyState] = useState<'applying' | 'confirmed' | 'timed_out'>(
@@ -792,7 +750,7 @@ function ResultScreen({ onClose, overlay, t }: Omit<ScreenProps, 'onPatch'>) {
     return onClose()
   }
 
-  const rows: Row[] = recoveryUrl
+  const rows: MenuRowSpec[] = recoveryUrl
     ? [{ color: t.color.accent, label: 'Open the portal to finish', run: openRecovery }, { label: 'Close', run: onClose }]
     : [{ label: 'Close', run: onClose }]
 
@@ -897,7 +855,7 @@ function StepUpScreen({ onPatch, overlay, t }: ScreenProps) {
     onPatch({ screen: retry?.kind === 'apply' ? 'confirm' : 'overview', stepUpRetry: null })
   }
 
-  const rows: Row[] =
+  const rows: MenuRowSpec[] =
     phase === 'granted'
       ? [{ color: t.color.ok, label: retry?.kind === 'apply' ? 'Continue the change' : 'Continue', run: resume }, { label: 'Cancel', run: back }]
       : phase === 'prompt'

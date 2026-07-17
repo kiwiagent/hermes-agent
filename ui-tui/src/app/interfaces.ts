@@ -238,6 +238,8 @@ export interface SubscriptionPendingChange {
 export interface SubscriptionResult {
   message: string
   ok: boolean
+  /** Set on a successful upgrade; drives the ResultScreen apply-poll. */
+  pendingTierId?: null | string
   /** A portal URL to finish an SCA/declined upgrade, when present. */
   recoveryUrl?: null | string
 }

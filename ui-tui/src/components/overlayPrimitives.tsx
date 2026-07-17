@@ -1,8 +1,59 @@
-import { Text } from '@hermes/ink'
-import type { ReactNode } from 'react'
+import type { Key } from '@hermes/ink'
+import { Text, useInput } from '@hermes/ink'
+import { type ReactNode, useState } from 'react'
 
 import type { UsageModelData } from '../gatewayTypes.js'
 import type { Theme } from '../theme.js'
+
+export interface MenuRowSpec {
+  color?: string
+  label: string
+  run: () => void
+}
+
+/**
+ * ↑/↓ + Enter + number-key selection over `rows`; Esc runs `onEscape`.
+ * `onKey`, when given, runs first on every keypress — return `true` to mark
+ * the key fully handled and skip the default escape/arrow/enter/number
+ * handling for that keypress (e.g. a screen with a text-input sub-mode).
+ */
+export function useMenu(
+  rows: MenuRowSpec[],
+  onEscape: () => void,
+  onKey?: (ch: string, key: Key) => boolean
+): number {
+  const [sel, setSel] = useState(0)
+
+  useInput((ch, key) => {
+    if (onKey?.(ch, key)) {
+      return
+    }
+
+    if (key.escape) {
+      return onEscape()
+    }
+
+    if (key.upArrow && sel > 0) {
+      setSel(v => v - 1)
+    }
+
+    if (key.downArrow && sel < rows.length - 1) {
+      setSel(v => v + 1)
+    }
+
+    if (key.return) {
+      return rows[sel]?.run()
+    }
+
+    const n = parseInt(ch, 10)
+
+    if (n >= 1 && n <= rows.length) {
+      return rows[n - 1]?.run()
+    }
+  })
+
+  return Math.min(sel, Math.max(0, rows.length - 1))
+}
 
 /** A numbered menu row with the ▸ cursor (mirrors ClarifyPrompt). */
 export function MenuRow({ active, index, label, t }: { active: boolean; index: number; label: string; t: Theme }) {

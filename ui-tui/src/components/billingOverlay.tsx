@@ -7,7 +7,7 @@ import type { BillingOverlayState } from '../app/interfaces.js'
 import type { BillingStateResponse } from '../gatewayTypes.js'
 import type { Theme } from '../theme.js'
 
-import { ActionRow, footer, MenuRow, UsageBars } from './overlayPrimitives.js'
+import { ActionRow, footer, MenuRow, type MenuRowSpec, UsageBars, useMenu } from './overlayPrimitives.js'
 import { TextInput } from './textInput.js'
 
 interface BillingOverlayProps {
@@ -104,8 +104,6 @@ function OverviewScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
     ? ['Add funds', 'Auto-reload', 'Monthly limit', 'Manage on portal', 'Cancel']
     : ['Manage on portal', 'Cancel']
 
-  const [sel, setSel] = useState(0)
-
   const choose = (i: number) => {
     if (full) {
       if (i === 0) {
@@ -132,29 +130,8 @@ function OverviewScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
     onClose()
   }
 
-  useInput((ch, key) => {
-    if (key.escape) {
-      return onClose()
-    }
-
-    if (key.upArrow && sel > 0) {
-      setSel(v => v - 1)
-    }
-
-    if (key.downArrow && sel < items.length - 1) {
-      setSel(v => v + 1)
-    }
-
-    if (key.return) {
-      return choose(sel)
-    }
-
-    const n = parseInt(ch, 10)
-
-    if (n >= 1 && n <= items.length) {
-      return choose(n - 1)
-    }
-  })
+  const rows: MenuRowSpec[] = items.map((label, i) => ({ label, run: () => choose(i) }))
+  const sel = useMenu(rows, onClose)
 
   const auto = autoReloadLine(s)
   // Balance leads, in the title — the first thing seen (review feedback).
@@ -917,8 +894,7 @@ function AutoReloadScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
 // ── Screen 5: Monthly spend limit (read-only) ─────────────────────────
 
 function LimitScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
-  const rows = ['Manage on portal', 'Cancel']
-  const [sel, setSel] = useState(0)
+  const labels = ['Manage on portal', 'Cancel']
 
   const choose = (i: number) => {
     if (i === 0 && s.portal_url) {
@@ -930,29 +906,8 @@ function LimitScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
     onPatch({ screen: 'overview' })
   }
 
-  useInput((ch, key) => {
-    if (key.escape) {
-      return onPatch({ screen: 'overview' })
-    }
-
-    if (key.upArrow && sel > 0) {
-      setSel(v => v - 1)
-    }
-
-    if (key.downArrow && sel < rows.length - 1) {
-      setSel(v => v + 1)
-    }
-
-    if (key.return) {
-      return choose(sel)
-    }
-
-    const n = parseInt(ch, 10)
-
-    if (n >= 1 && n <= rows.length) {
-      return choose(n - 1)
-    }
-  })
+  const rows: MenuRowSpec[] = labels.map((label, i) => ({ label, run: () => choose(i) }))
+  const sel = useMenu(rows, () => onPatch({ screen: 'overview' }))
 
   const cap = s.monthly_cap
 
@@ -969,11 +924,11 @@ function LimitScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
       <Text color={t.color.text}>{usageLine}</Text>
       <Text color={t.color.muted}>The monthly limit is set on the portal — shown here read-only.</Text>
       <Text />
-      {rows.map((label, i) => (
+      {labels.map((label, i) => (
         <MenuRow active={sel === i} index={i + 1} key={label} label={label} t={t} />
       ))}
       <Text />
-      {footer(`↑/↓ select · 1-${rows.length} quick pick · Enter confirm · Esc back`, t)}
+      {footer(`↑/↓ select · 1-${labels.length} quick pick · Enter confirm · Esc back`, t)}
     </Box>
   )
 }
