@@ -39,6 +39,7 @@ from hermes_cli.nous_billing import (
     BillingRateLimited,
     BillingScopeRequired,
     BillingStripeUnavailable,
+    BillingTransient,
     BillingUpgradeCapExceeded,
     _raise_for_error,
     resolve_portal_base_url,
@@ -185,6 +186,19 @@ def test_state_can_change_plan_falls_back_to_legacy_role_check():
     assert billing_state_from_payload(member).can_change_plan is False
 
 
+def test_can_charge_finance_admin_with_server_capability():
+    """Server capability can grant FINANCE_ADMIN charge access."""
+    payload = _member_payload()
+    payload["org"]["role"] = "FINANCE_ADMIN"
+    payload["canChangePlan"] = True
+
+    state = billing_state_from_payload(payload)
+
+    assert state.is_admin is False
+    assert state.can_change_plan is True
+    assert state.can_charge is True
+
+
 def test_state_owner_tier_parse():
     s = billing_state_from_payload(_owner_payload())
     assert s.is_admin is True
@@ -327,7 +341,8 @@ def test_specific_billing_throttle_errors_remain_distinguishable(
 
     assert ei.value.error == error
     assert ei.value.retry_after == 90
-    assert isinstance(ei.value, BillingRateLimited)
+    assert isinstance(ei.value, BillingTransient)
+    assert not isinstance(ei.value, BillingRateLimited)
 
 
 @pytest.mark.parametrize(
