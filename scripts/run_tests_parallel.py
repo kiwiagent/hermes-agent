@@ -241,8 +241,8 @@ def _run_one_file(
 
     ``retries`` > 0 enables the one-shot flake retry: a non-zero exit is
     re-run in a fresh subprocess; if the re-run passes, the file counts as
-    passed but the output is prefixed with a FLAKY banner and the file is
-    recorded in ``_FLAKY_FILES`` so the summary can call it out. A
+    passed but the output is prefixed with a FLAKY banner and the file/output
+    are recorded in ``_FLAKY_RESULTS`` so the summary can call it out. A
     deterministic failure fails every attempt, so real regressions cannot
     be laundered green.
 
@@ -279,19 +279,22 @@ def _run_one_file(
         )
         subproc_wall += subproc_wall2
         if rc == 0:
-            with _flaky_lock:
-                _FLAKY_FILES.append(file)
             output = (
                 f"⚠ FLAKY: failed on attempt 1, passed on retry "
                 f"(attempt {attempt + 1}). Fix the flake — do not ignore this.\n"
                 f"--- first-attempt output ---\n{first_output}\n"
                 f"--- retry output ---\n{output}"
             )
+            with _flaky_lock:
+                _FLAKY_RESULTS.append((file, output))
     return file, rc, output, summary, subproc_wall
 
 
-# Files that failed once and passed on retry — reported in the summary.
-_FLAKY_FILES: List[Path] = []
+# Files that failed once and passed on retry, with both attempts' output.
+# Keeping the traceback is load-bearing: a self-healed flake without its
+# failing assertion is only a filename, which forces another expensive full
+# run to rediscover the race.
+_FLAKY_RESULTS: List[Tuple[Path, str]] = []
 _flaky_lock = threading.Lock()
 
 
@@ -958,11 +961,12 @@ def main() -> int:
 
     # Flaky files: failed once, passed on the automatic retry. Green, but
     # loudly reported so they get fixed instead of silently re-flaking.
-    if _FLAKY_FILES:
+    if _FLAKY_RESULTS:
         print()
-        print(f"=== ⚠ {len(_FLAKY_FILES)} FLAKY file{'s' if len(_FLAKY_FILES) != 1 else ''} (failed once, passed on retry — fix these) ===")
-        for f in _FLAKY_FILES:
+        print(f"=== ⚠ {len(_FLAKY_RESULTS)} FLAKY file{'s' if len(_FLAKY_RESULTS) != 1 else ''} (failed once, passed on retry — fix these) ===")
+        for f, output in _FLAKY_RESULTS:
             print(f"  {_format_file(f, repo_root)}")
+            print(output.rstrip())
 
     # Save durations for future --slice runs. Each slice writes its own
     # partial test_durations.json; a CI merge step joins them later.
