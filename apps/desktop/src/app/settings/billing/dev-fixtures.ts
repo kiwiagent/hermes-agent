@@ -20,6 +20,7 @@ const current = (
 
 export const todayBillingState = {
   auto_reload: {
+    card: { kind: 'canonical' },
     enabled: true,
     reload_to_display: '$10',
     reload_to_usd: '10',
@@ -93,6 +94,7 @@ export const todaySubscriptionState = {
 export const postTrainBillingState = {
   ...todayBillingState,
   auto_reload: {
+    card: { kind: 'canonical' },
     enabled: false,
     reload_to_display: '$100',
     reload_to_usd: '100',
@@ -107,7 +109,6 @@ export const postTrainBillingState = {
     display: 'Visa ....4242 - the card on your subscription',
     last4: '4242',
     masked: 'visa ....4242',
-    needs_repair: false,
     resolved_via: 'subPin'
   },
   charge_presets: ['25', '50', '100'],
@@ -216,6 +217,7 @@ const okSubscription = (data: SubscriptionStateResponse): BillingResult<Subscrip
 function withUsage(
   name: string,
   {
+    autoReload = postTrainBillingState.auto_reload,
     canCharge = true,
     card = postTrainBillingState.card,
     cliBillingEnabled = true,
@@ -223,6 +225,7 @@ function withUsage(
     remaining,
     subscriptionCurrent = current({ credits_remaining: remaining, monthly_credits: '220' })
   }: {
+    autoReload?: BillingStateResponse['auto_reload']
     canCharge?: boolean
     card?: BillingStateResponse['card']
     cliBillingEnabled?: boolean
@@ -233,6 +236,7 @@ function withUsage(
 ) {
   const billing = {
     ...postTrainBillingState,
+    auto_reload: autoReload,
     balance_display: '$142.50',
     balance_usd: '142.50',
     can_charge: canCharge,
@@ -266,6 +270,13 @@ function withUsage(
 
 export const billingDevFixtures = {
   healthy: withUsage('Healthy', { monthlyCapSpent: '89', remaining: '132' }),
+  'auto-refill-divergent': withUsage('Auto Refill Divergent', {
+    autoReload: {
+      ...postTrainBillingState.auto_reload,
+      card: { kind: 'distinct', payment_method_id: 'pm_divergent_1', brand: 'mastercard', last4: '4444' }
+    },
+    remaining: '132'
+  }),
   low: withUsage('Low', { remaining: '19.8' }),
   boundary: withUsage('Boundary', { remaining: '22' }),
   'empty-overdrawn': withUsage('Empty Overdrawn', { remaining: '-0.79' }),

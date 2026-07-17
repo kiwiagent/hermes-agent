@@ -9,6 +9,7 @@ import type {
 
 const fullBillingState = {
   auto_reload: {
+    card: { kind: 'canonical' },
     enabled: true,
     reload_to_display: '$100',
     reload_to_usd: '100',
@@ -23,7 +24,6 @@ const fullBillingState = {
     display: 'Visa ....4242 - the card on your subscription',
     last4: '4242',
     masked: 'visa ....4242',
-    needs_repair: false,
     resolved_via: 'subPin'
   },
   charge_presets: ['25', '50', '100'],

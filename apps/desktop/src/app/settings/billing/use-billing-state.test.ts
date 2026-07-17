@@ -69,6 +69,7 @@ describe('deriveBillingView', () => {
     )
     expect(buyCredits?.chips).toBeUndefined()
     expect(view.accountRows.find(row => row.id === 'auto_reload')).toMatchObject({
+      action: { label: 'Manage' },
       caption: 'Refill $10 when balance falls below $5',
       pill: { label: 'Enabled', tone: 'primary' }
     })
@@ -92,6 +93,45 @@ describe('deriveBillingView', () => {
       bar: { value: 0.4 },
       value: '$40 of $100 left'
     })
+  })
+
+  it('points divergent auto-refill cards at the portal for reconciliation', () => {
+    const view = deriveBillingView(
+      okBilling({
+        ...todayBillingState,
+        auto_reload: {
+          ...todayBillingState.auto_reload,
+          card: { kind: 'distinct', payment_method_id: 'pm_1', brand: 'mastercard', last4: '4444' }
+        }
+      }),
+      okSubscription(todaySubscriptionState)
+    )
+    const autoReload = view.accountRows.find(row => row.id === 'auto_reload')
+
+    expect(autoReload?.caption).toContain('Mastercard ••4444')
+    expect(autoReload?.caption).toContain('reconcile')
+    expect(autoReload?.action).toEqual({
+      label: 'Reconcile ↗',
+      url: 'https://portal.nousresearch.com/billing'
+    })
+  })
+
+  it('degrades safely when a divergent auto-refill card has no display details', () => {
+    const view = deriveBillingView(
+      okBilling({
+        ...todayBillingState,
+        auto_reload: {
+          ...todayBillingState.auto_reload,
+          card: { kind: 'distinct', payment_method_id: 'pm_1', brand: null, last4: null }
+        }
+      }),
+      okSubscription(todaySubscriptionState)
+    )
+    const autoReload = view.accountRows.find(row => row.id === 'auto_reload')
+
+    expect(autoReload?.caption).toContain('a different card')
+    expect(autoReload?.caption).not.toContain('null')
+    expect(autoReload?.action?.url).toBe('https://portal.nousresearch.com/billing')
   })
 
   it('keeps buy credit controls visible but disabled when no card is on file', () => {

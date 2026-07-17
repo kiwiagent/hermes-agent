@@ -14,8 +14,21 @@ const retryMessage = (refusal: BillingRefusal): string => {
   return `🟡 Too many charges right now${mins}. This isn't a payment failure.`
 }
 
+const stripeRetryMessage = (refusal: BillingRefusal): string => {
+  const mins = refusal.retryAfter ? ` (try again in ~${Math.max(1, Math.round(refusal.retryAfter / 60))} min)` : ''
+
+  return `Stripe is having trouble — try again shortly${mins}`
+}
+
 export const resolveRefusal = (refusal: BillingRefusal): BillingRefusalPresentation => {
   switch (refusal.kind) {
+    case 'consent_required':
+      return {
+        action: portalAction(refusal.portalUrl),
+        message: 'Confirm this card for terminal charges in the portal',
+        title: 'Card confirmation needed'
+      }
+
     case 'insufficient_scope':
       return {
         action: { type: 'step_up' },
@@ -73,6 +86,14 @@ export const resolveRefusal = (refusal: BillingRefusal): BillingRefusalPresentat
           "(one-time credit buys don't save a reusable card).",
         title: 'No saved card'
       }
+
+    case 'org_access_denied':
+      return {
+        action: { type: 'none' },
+        message: "This token isn't bound to an org you can manage",
+        title: 'Org access denied'
+      }
+
     case 'monthly_cap_exceeded': {
       const remaining = refusal.payload?.remainingUsd
 
@@ -93,6 +114,27 @@ export const resolveRefusal = (refusal: BillingRefusal): BillingRefusalPresentat
         action: { type: 'retry' },
         message: retryMessage(refusal),
         title: 'Too many charges right now'
+      }
+
+    case 'stripe_unavailable':
+      return {
+        action: { type: 'retry' },
+        message: stripeRetryMessage(refusal),
+        title: 'Stripe is having trouble'
+      }
+
+    case 'processing_error':
+      return {
+        action: { type: 'retry' },
+        message: 'Something went wrong processing that request. Try again.',
+        title: 'Processing error'
+      }
+
+    case 'upgrade_cap_exceeded':
+      return {
+        action: { type: 'none' },
+        message: 'Daily plan-change limit reached — try again tomorrow',
+        title: 'Daily plan-change limit reached'
       }
 
     case 'endpoint_unavailable':

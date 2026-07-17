@@ -355,6 +355,21 @@ function autoReloadRow(billing: BillingStateResponse): BillingAccountRowView {
     }
   }
 
+  if (autoReload.card.kind === 'distinct') {
+    const { brand, last4 } = autoReload.card
+    const cardLabel = brand && last4 ? `${capitalize(brand)} ••${last4}` : 'a different card'
+    const portalUrl = billing.portal_url ?? FALLBACK_PORTAL_BILLING_URL
+
+    return {
+      action: { label: 'Reconcile ↗', url: portalUrl },
+      caption: `Auto-refill charges ${cardLabel} — reconcile on the portal`,
+      description: 'Keep your balance topped up when it drops below your threshold.',
+      id: 'auto_reload',
+      pill: { label: 'Enabled', tone: 'primary' },
+      title: 'Auto-refill'
+    }
+  }
+
   return {
     action: { label: 'Manage' },
     caption: `Refill ${autoReload.reload_to_display || formatMoney(autoReload.reload_to_usd)} when balance falls below ${

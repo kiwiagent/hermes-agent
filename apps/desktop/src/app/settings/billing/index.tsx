@@ -312,10 +312,14 @@ function AutoReloadRow({ autoReload, row }: { autoReload: BillingAutoReload; row
     <ListRow
       action={
         <RowValue
-          onAction={() => {
-            resetFeedback()
-            setEditing(true)
-          }}
+          onAction={
+            row.action?.url
+              ? undefined
+              : () => {
+                  resetFeedback()
+                  setEditing(true)
+                }
+          }
           row={row}
         />
       }

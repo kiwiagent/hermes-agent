@@ -7,24 +7,12 @@ import type {
   BillingChargeStatusResponse,
   BillingErrorPayload,
   BillingMutationResponse,
+  BillingRefusalCode,
   BillingStateResponse,
   SubscriptionStateResponse
 } from './types'
 
-export type BillingErrorKind =
-  | 'cli_billing_disabled'
-  | 'endpoint_unavailable'
-  | 'idempotency_conflict'
-  | 'insufficient_scope'
-  | 'monthly_cap_exceeded'
-  | 'no_payment_method'
-  | 'rate_limited'
-  | 'remote_spending_disabled'
-  | 'remote_spending_revoked'
-  | 'role_required'
-  | 'session_revoked'
-  | 'temporarily_unavailable'
-  | (string & {})
+export type BillingErrorKind = BillingRefusalCode
 
 export interface BillingRefusal {
   actor?: string

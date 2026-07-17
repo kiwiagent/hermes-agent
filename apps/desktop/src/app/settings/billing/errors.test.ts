@@ -3,21 +3,28 @@ import { describe, expect, it } from 'vitest'
 import type { BillingErrorKind, BillingRefusal } from './api'
 import { resolveRefusal } from './errors'
 
-const expectedActions: Record<BillingErrorKind | 'transport' | 'timeout', 'portal' | 'retry' | 'step_up' | 'none'> = {
+const expectedActions: Partial<
+  Record<BillingErrorKind | 'transport' | 'timeout', 'portal' | 'retry' | 'step_up' | 'none'>
+> = {
   cli_billing_disabled: 'portal',
+  consent_required: 'portal',
   endpoint_unavailable: 'retry',
   idempotency_conflict: 'none',
   insufficient_scope: 'step_up',
   monthly_cap_exceeded: 'portal',
   no_payment_method: 'portal',
+  org_access_denied: 'none',
+  processing_error: 'retry',
   rate_limited: 'retry',
   remote_spending_disabled: 'portal',
   remote_spending_revoked: 'portal',
   role_required: 'portal',
   session_revoked: 'portal',
+  stripe_unavailable: 'retry',
   temporarily_unavailable: 'retry',
   timeout: 'retry',
-  transport: 'retry'
+  transport: 'retry',
+  upgrade_cap_exceeded: 'none'
 }
 
 describe('resolveRefusal', () => {
@@ -44,6 +51,16 @@ describe('resolveRefusal', () => {
     })
 
     expect(resolved.message).toContain('$4.50 headroom left')
+  })
+
+  it('includes Stripe retry timing when the server sends it', () => {
+    const resolved = resolveRefusal({
+      kind: 'stripe_unavailable',
+      message: 'Stripe is unavailable.',
+      retryAfter: 120
+    })
+
+    expect(resolved.message).toContain('try again in ~2 min')
   })
 
   it('falls back sanely for unknown refusal kinds', () => {
