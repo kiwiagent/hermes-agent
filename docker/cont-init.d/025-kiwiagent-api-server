@@ -1,0 +1,60 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+#
+# kiwiagent SaaS 场景专用: 从环境变量把 hermes API server 打开.
+#
+# hermes 默认 cli-config.yaml.example 里 platforms.api_server 整块是注释掉的,
+# 而 hermes 不做 YAML 里的 ${VAR} env 展开. 在 SaaS 场景下每个租户 pod 都要
+# 开 OpenAI-compatible API 让 gateway 调, 但 pod 的第一次启动只是 seed 一份
+# 拷贝, 我们需要在 seed 之后 patch config.yaml 打开 api_server + 塞入 key.
+#
+# 序号 025: 在 stage2 (01-hermes-setup) 和 02-reconcile-profiles 之后, 保证
+# config.yaml 已 seed 出来才做 patch. 幂等: 同 key 已经写入就 no-op.
+#
+# 触发条件: API_SERVER_KEY 环境变量存在. 上游用户不用这个 env 时脚本静默
+# 退出, 对 non-kiwiagent 场景零影响.
+set -eu
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+CFG="$HERMES_HOME/config.yaml"
+
+# 没设 key 说明不是 SaaS pod, 不需要开 api_server, 立即返回
+if [ -z "${API_SERVER_KEY:-}" ]; then
+    exit 0
+fi
+
+# config.yaml 一定要在 —— 依赖 01-hermes-setup 的 seed 逻辑
+if [ ! -f "$CFG" ]; then
+    echo "[025-kiwiagent] $CFG missing (seed 未运行?), 跳过" >&2
+    exit 0
+fi
+
+# 用 hermes venv 里的 python 跑 yaml patch —— 幂等, 保证 sort_keys=False 尽量
+# 保住 seed 出来的字段顺序.
+exec s6-setuidgid hermes /opt/hermes/.venv/bin/python - <<'PY'
+import os, sys, yaml, pathlib
+
+cfg_path = pathlib.Path(os.environ.get("HERMES_HOME", "/opt/data")) / "config.yaml"
+key = os.environ["API_SERVER_KEY"]
+
+data = yaml.safe_load(cfg_path.read_text()) or {}
+platforms = data.setdefault("platforms", {})
+api_server = platforms.setdefault("api_server", {})
+extra = api_server.setdefault("extra", {})
+
+already_ok = api_server.get("enabled") is True and extra.get("key") == key
+if already_ok:
+    sys.exit(0)
+
+api_server["enabled"] = True
+extra["key"] = key
+
+# host 默认 0.0.0.0 —— 从 API_SERVER_HOST 覆盖. hermes API server config 目前
+# 不认这个 key, 但预留位置便于后续 upstream 若加此字段直接生效.
+host = os.environ.get("API_SERVER_HOST")
+if host:
+    extra.setdefault("host", host)
+
+cfg_path.write_text(yaml.safe_dump(data, sort_keys=False))
+print(f"[025-kiwiagent] api_server enabled (key tail=***{key[-6:]})")
+PY
