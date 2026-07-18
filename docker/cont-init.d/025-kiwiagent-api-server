@@ -1,25 +1,27 @@
 #!/command/with-contenv sh
 # shellcheck shell=sh
 #
-# kiwiagent SaaS 场景专用: 从环境变量把 hermes API server 打开.
+# kiwiagent SaaS 场景专用: 从环境变量把 hermes 的 config.yaml 补上两块 SaaS
+# 必需字段, 而 hermes 上游本身不做 YAML 里的 ${VAR} env 展开:
+#   1. platforms.api_server.{enabled, extra.key}   —— 让 gateway 能调 pod
+#   2. model.{provider, base_url, api_key, default} —— 让 hermes 把推理走
+#      集群内的 LiteLLM 而不是默认的 OpenRouter
 #
-# hermes 默认 cli-config.yaml.example 里 platforms.api_server 整块是注释掉的,
-# 而 hermes 不做 YAML 里的 ${VAR} env 展开. 在 SaaS 场景下每个租户 pod 都要
-# 开 OpenAI-compatible API 让 gateway 调, 但 pod 的第一次启动只是 seed 一份
-# 拷贝, 我们需要在 seed 之后 patch config.yaml 打开 api_server + 塞入 key.
+# 序号 025: 在 stage2 (01-hermes-setup seed) 和 02-reconcile-profiles 之后,
+# 保证 config.yaml 已 seed 出来才做 patch. 幂等: 同 key/base_url 已经写入
+# 就 no-op.
 #
-# 序号 025: 在 stage2 (01-hermes-setup) 和 02-reconcile-profiles 之后, 保证
-# config.yaml 已 seed 出来才做 patch. 幂等: 同 key 已经写入就 no-op.
-#
-# 触发条件: API_SERVER_KEY 环境变量存在. 上游用户不用这个 env 时脚本静默
-# 退出, 对 non-kiwiagent 场景零影响.
+# 触发条件:
+#   API_SERVER_KEY   -> 开 api_server (SaaS gateway 契约)
+#   LITELLM_BASE_URL -> 把 model provider 指向 LiteLLM
+# 都不设时脚本静默退出, 对 non-kiwiagent 场景零影响.
 set -eu
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 CFG="$HERMES_HOME/config.yaml"
 
-# 没设 key 说明不是 SaaS pod, 不需要开 api_server, 立即返回
-if [ -z "${API_SERVER_KEY:-}" ]; then
+# 两个触发条件都没设 → 不是 SaaS pod, 立即返回
+if [ -z "${API_SERVER_KEY:-}" ] && [ -z "${LITELLM_BASE_URL:-}" ]; then
     exit 0
 fi
 
@@ -29,32 +31,57 @@ if [ ! -f "$CFG" ]; then
     exit 0
 fi
 
-# 用 hermes venv 里的 python 跑 yaml patch —— 幂等, 保证 sort_keys=False 尽量
-# 保住 seed 出来的字段顺序.
 exec s6-setuidgid hermes /opt/hermes/.venv/bin/python - <<'PY'
 import os, sys, yaml, pathlib
 
 cfg_path = pathlib.Path(os.environ.get("HERMES_HOME", "/opt/data")) / "config.yaml"
-key = os.environ["API_SERVER_KEY"]
-
 data = yaml.safe_load(cfg_path.read_text()) or {}
-platforms = data.setdefault("platforms", {})
-api_server = platforms.setdefault("api_server", {})
-extra = api_server.setdefault("extra", {})
+dirty = False
 
-already_ok = api_server.get("enabled") is True and extra.get("key") == key
-if already_ok:
+# ---------- 1) API server (gateway 调 pod 用) ----------
+api_key = os.environ.get("API_SERVER_KEY")
+if api_key:
+    platforms = data.setdefault("platforms", {})
+    api_server = platforms.setdefault("api_server", {})
+    extra = api_server.setdefault("extra", {})
+    if not (api_server.get("enabled") is True and extra.get("key") == api_key):
+        api_server["enabled"] = True
+        extra["key"] = api_key
+        host = os.environ.get("API_SERVER_HOST")
+        if host:
+            extra.setdefault("host", host)
+        dirty = True
+
+# ---------- 2) LiteLLM 作为 model provider ----------
+litellm_url = os.environ.get("LITELLM_BASE_URL")
+if litellm_url:
+    litellm_key = os.environ.get("LITELLM_API_KEY", "")
+    default_model = os.environ.get("HERMES_DEFAULT_MODEL", "qwen-plus")
+    # LiteLLM 是 OpenAI-compat, 需要 base_url 上追 /v1
+    base = litellm_url.rstrip("/")
+    if not base.endswith("/v1"):
+        base = base + "/v1"
+
+    model = data.setdefault("model", {})
+    already = (
+        model.get("provider") == "custom"
+        and model.get("base_url") == base
+        and model.get("api_key") == litellm_key
+        and (model.get("default") == default_model or model.get("model") == default_model)
+    )
+    if not already:
+        model["provider"] = "custom"
+        model["base_url"] = base
+        model["api_key"] = litellm_key
+        # hermes 支持 "default" 或 "model" 两种 key 名, 都写以防
+        model["default"] = default_model
+        model["model"] = default_model
+        dirty = True
+
+if not dirty:
     sys.exit(0)
 
-api_server["enabled"] = True
-extra["key"] = key
-
-# host 默认 0.0.0.0 —— 从 API_SERVER_HOST 覆盖. hermes API server config 目前
-# 不认这个 key, 但预留位置便于后续 upstream 若加此字段直接生效.
-host = os.environ.get("API_SERVER_HOST")
-if host:
-    extra.setdefault("host", host)
-
 cfg_path.write_text(yaml.safe_dump(data, sort_keys=False))
-print(f"[025-kiwiagent] api_server enabled (key tail=***{key[-6:]})")
+tag = api_key[-6:] if api_key else "-"
+print(f"[025-kiwiagent] config patched (api_server key tail=***{tag}, model={data.get('model',{}).get('default','?')})")
 PY
