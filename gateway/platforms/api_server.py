@@ -96,6 +96,7 @@ _CAPABILITY_ENDPOINTS = (
     ("session_chat", ("POST", "/api/sessions/{session_id}/chat")),
     ("session_chat_stream", ("POST", "/api/sessions/{session_id}/chat/stream")),
     ("session_model_lock", ("POST", "/api/sessions/{session_id}/model")),
+    ("file_download", ("GET", "/api/files/{b64_path}")),
     ("browser_control_register", ("POST", "/v1/browser-control/register")),
     ("browser_control_ws", ("GET", "/v1/browser-control/ws")),
     ("artifact_upload", ("POST", "/v1/artifacts/upload")),
@@ -895,6 +896,64 @@ def _resolve_media_to_data_urls(text: str) -> str:
         return text if resolved == scan else resolved
     except Exception:
         return text
+
+
+def _file_download_url(path: str) -> str:
+    """Encode a pod path into a single-segment URL path (/api/files/{b64})."""
+    import base64
+    b64 = base64.urlsafe_b64encode(path.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"/api/files/{b64}"
+
+
+def _decode_file_path(b64: str) -> Optional[Path]:
+    """Reverse [_file_download_url]. Returns the file Path or None."""
+    import base64
+    if not b64 or len(b64) > 4096:
+        return None
+    try:
+        padded = b64 + "=" * (-len(b64) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        p = Path(raw.decode("utf-8", "replace"))
+    except Exception:
+        return None
+    if p.is_absolute():
+        return p if p.is_file() else None
+    cand = Path.home() / ".hermes" / "cache" / str(p)
+    return cand if cand.is_file() else None
+
+
+def _extract_media_attachments(text: str) -> tuple[List[Dict[str, str]], str]:
+    """Convert non-image ``MEDIA:<path>`` tags into fetchable attachment URLs.
+
+    Images are handled first by ``_resolve_media_to_data_urls`` (inline base64,
+    above), so anything still carrying a ``MEDIA:`` tag here is a non-image
+    file the agent produced for the client. We convert each to a URL the
+    client can pull back via ``GET /api/files/{b64}`` — same handoff as the
+    WeChat channel, adapted for the HTTP API where there is no shared
+    filesystem. Tags are stripped from the user-visible text.
+
+    Returns ``(attachments, cleaned_content)``.
+    """
+    if not text or "MEDIA:" not in text:
+        return [], text
+
+    attachments: List[Dict[str, str]] = []
+
+    def _repl(m: "re.Match[str]") -> str:
+        path = validate_media_delivery_path(m.group("path"))
+        if not path:
+            return m.group(0)
+        p = Path(path)
+        if not p.is_file():
+            return m.group(0)
+        attachments.append({"url": _file_download_url(str(p)), "name": p.name})
+        return ""
+
+    try:
+        cleaned = MEDIA_TAG_CLEANUP_RE.sub(_repl, text)
+    except Exception:
+        return [], text
+    return attachments, cleaned
 
 
 def _redact_api_error_text(value: Any, *, limit: int | None = None) -> str:
@@ -1743,6 +1802,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("POST", "/api/sessions/{session_id}/chat", self._handle_session_chat),
             ("POST", "/api/sessions/{session_id}/chat/stream", self._handle_session_chat_stream),
             ("POST", "/api/sessions/{session_id}/model", self._handle_session_model_lock),
+            ("GET", "/api/files/{b64_path}", self._handle_file_serve),
             ("POST", "/v1/chat/completions", self._handle_chat_completions),
             ("POST", "/v1/responses", self._handle_responses),
             ("GET", "/v1/responses/{response_id}", self._handle_get_response),
@@ -3601,15 +3661,34 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 conversation_history=history, resume_unanswered_turn=True, **ctx["run_kwargs"])
         is_dict = isinstance(result, dict)
         effective_session_id = result.get("session_id") if is_dict else session_id
+        # Images inline as base64 data URLs; non-image files become
+        # attachments the client pulls back via GET /api/files.
         final_response = _resolve_media_to_data_urls(
             result.get("final_response", "") if is_dict else "")
+        attachments, final_response = _extract_media_attachments(final_response)
         headers = self._session_headers(effective_session_id or session_id, gateway_session_key)
         return web.json_response(
             {"object": "hermes.session.chat.completion",
              "session_id": effective_session_id or session_id,
-             "message": {"role": "assistant", "content": final_response}, "usage": usage,
+             "message": {"role": "assistant", "content": final_response},
+             "attachments": attachments, "usage": usage,
              "runtime": self._effective_turn_runtime(ctx["runtime_request"], result, usage)},
             headers=headers)
+
+    async def _handle_file_serve(self, request: web.Request) -> web.Response:
+        """GET /api/files/{b64_path} — serve a file the agent produced.
+
+        The path is base64url-encoded (path segments can't carry slashes in
+        the route). Same Bearer auth as every other endpoint — APISIX forwards
+        the owner's JWT and rewrites it to API_SERVER_KEY before proxying.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        path = _decode_file_path(request.match_info["b64_path"])
+        if path is None:
+            return _error_response("File not found", 404, code="file_not_found")
+        return web.FileResponse(str(path))
 
     @_admit_api_agent_request
     async def _handle_session_chat_stream(self, request: web.Request) -> web.StreamResponse:
