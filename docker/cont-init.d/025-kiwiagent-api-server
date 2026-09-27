@@ -1,11 +1,15 @@
 #!/command/with-contenv sh
 # shellcheck shell=sh
 #
-# kiwiagent SaaS 场景专用: 从环境变量把 hermes 的 config.yaml 补上两块 SaaS
+# kiwiagent SaaS 场景专用: 从环境变量把 hermes 的 config.yaml 补上几块 SaaS
 # 必需字段, 而 hermes 上游本身不做 YAML 里的 ${VAR} env 展开:
 #   1. platforms.api_server.{enabled, extra.key}   —— 让 gateway 能调 pod
 #   2. model.{provider, base_url, api_key, default} —— 让 hermes 把推理走
 #      集群内的 LiteLLM 而不是默认的 OpenRouter
+#   3. plugins.enabled += platforms/smartbuddy + tts.provider=smartbuddy
+#      —— hermes 升级为插件默认 opt-in 后, bundled 的 smartbuddy 平台插件
+#      不再自动加载, 其 platform_hint (onboarding 接力) 和 TTS provider
+#      (对话内语音切换) 随之失效; 这里显式启用以恢复原设计.
 #
 # 序号 025: 在 stage2 (01-hermes-setup seed) 和 02-reconcile-profiles 之后,
 # 保证 config.yaml 已 seed 出来才做 patch. 幂等: 同 key/base_url 已经写入
@@ -78,10 +82,29 @@ if litellm_url:
         model["model"] = default_model
         dirty = True
 
+# ---------- 3) SmartBuddy 插件 (onboarding + 对话内语音切换) ----------
+# 仅在 smartbuddy agent (SMARTBUDDY_AGENT_ID 存在) 上启用. 插件默认 opt-in,
+# 不在 plugins.enabled 里就不加载 -> platform_hint 与 TTS provider 都失效.
+# 插件 id 用路径式 "platforms/smartbuddy" (与 `hermes plugins enable` 写入
+# config 的形式一致); TTS provider 别名 "smartbuddy" (见插件 tts.py).
+if os.environ.get("SMARTBUDDY_AGENT_ID"):
+    plugins = data.setdefault("plugins", {})
+    enabled = plugins.get("enabled")
+    if not isinstance(enabled, list):
+        enabled = []
+        plugins["enabled"] = enabled
+    if "platforms/smartbuddy" not in enabled:
+        enabled.append("platforms/smartbuddy")
+        dirty = True
+    tts = data.setdefault("tts", {})
+    if tts.get("provider") != "smartbuddy":
+        tts["provider"] = "smartbuddy"
+        dirty = True
+
 if not dirty:
     sys.exit(0)
 
 cfg_path.write_text(yaml.safe_dump(data, sort_keys=False))
 tag = api_key[-6:] if api_key else "-"
-print(f"[025-kiwiagent] config patched (api_server key tail=***{tag}, model={data.get('model',{}).get('default','?')})")
+print(f"[025-kiwiagent] config patched (api_server key tail=***{tag}, model={data.get('model',{}).get('default','?')}, plugins={data.get('plugins',{}).get('enabled',[])}, tts={data.get('tts',{}).get('provider','-')})")
 PY
