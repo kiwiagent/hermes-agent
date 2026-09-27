@@ -45,6 +45,12 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          # Aliyun 个人版 ACR 不支持 OCI 1.1 的 attestation manifest
+          # (application/vnd.oci.empty.v1+json) —— 新版 buildx 默认会生成它,
+          # 导致 push 报 "unknown manifest class". 关掉 provenance/sbom, 产出
+          # 传统单 manifest, ACR 才能接收.
+          provenance: false
+          sbom: false
           tags: |
             ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/hermes-agent:latest
             ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/hermes-agent:${{ github.sha }}
