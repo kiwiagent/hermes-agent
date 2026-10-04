@@ -71,6 +71,33 @@ class TestCronDeliveryConfig:
         assert "cron" not in _config(home)
 
 
+class TestChatDisplayConfig:
+    """End users shouldn't see operator notices ("💾 Self-improvement review"
+    for memory updates / skill patches — new skills are still announced),
+    "⚡ Interrupting current task (iteration 4/90)"), and a follow-up message
+    should steer the running task instead of aborting it."""
+
+    def test_smartbuddy_pod_SilencesNoticesAndSteersFollowUps(self, home):
+        _run(home)
+
+        display = _config(home)["display"]
+        assert display["memory_notifications"] == "new_skills"
+        assert display["busy_ack_enabled"] is False
+        assert display["busy_input_mode"] == "steer"
+
+    def test_smartbuddy_pod_KeepsOtherDisplayKeys(self, home):
+        (home / "config.yaml").write_text(yaml.safe_dump({"model": {}, "display": {"show_reasoning": True}}))
+
+        _run(home)
+
+        assert _config(home)["display"]["show_reasoning"] is True
+
+    def test_non_smartbuddy_pod_LeavesDisplayAlone(self, home):
+        _run(home, SMARTBUDDY_AGENT_ID=None)
+
+        assert "display" not in _config(home)
+
+
 class TestCronModelSnapshotRealign:
     def test_unpinned_job_with_stale_snapshot_IsRealignedToCurrentModel(self, home):
         _write_jobs(home, [{"id": "a", "name": "Ballet", "model": None, "model_snapshot": "qwen-plus"}])

@@ -19,6 +19,7 @@ for invariants and PR review criteria.
 from __future__ import annotations
 
 import json
+import re
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -370,6 +371,37 @@ _COMBINED_REVIEW_PROMPT = (
 
 
 
+_SKILL_DESCRIPTION_RE = re.compile(r"^description:\s*(.+?)\s*$", re.MULTILINE)
+_CJK_RE = re.compile(r"[一-鿿]")
+
+
+def _friendly_new_skill(detail: Dict) -> str:
+    """kiwiagent: plain-language "learned a new skill" line for end users,
+    using the SKILL.md frontmatter description (Chinese if it is Chinese)."""
+    name = detail.get("name") or "new skill"
+    match = _SKILL_DESCRIPTION_RE.search(detail.get("content") or "")
+    description = match.group(1).strip().strip("\"'") if match else ""
+    if len(description) > 140:
+        description = description[:137].rstrip() + "…"
+    if _CJK_RE.search(description):
+        about = f"——{description.rstrip('。')}" if description else ""
+        return f"🧠 我学会了一个新技能：{name}{about}。下次遇到类似的事我会自动用上。"
+    about = f" — {description.rstrip('.')}" if description else ""
+    return f"🧠 I learned a new skill: {name}{about}. I'll use it automatically next time."
+
+
+def format_background_review_notice(actions: List[str], notification_mode: str) -> str:
+    """Chat text for a background review's actions.
+
+    ``new_skills`` (kiwiagent / SmartBuddy) lines are already user-facing, so
+    they're sent as-is; other modes keep the upstream operator format.
+    """
+    unique = list(dict.fromkeys(actions))
+    if str(notification_mode or "").lower() == "new_skills":
+        return "\n".join(unique)
+    return f"💾 Self-improvement review: {' · '.join(unique)}"
+
+
 def summarize_background_review_actions(
     review_messages: List[Dict],
     prior_snapshot: List[Dict],
@@ -386,11 +418,13 @@ def summarize_background_review_actions(
     - ``off``: return no actions.
     - ``on``: generic "Memory updated"/tool messages.
     - ``verbose``: include compact content previews from tool-call arguments.
+    - ``new_skills`` (kiwiagent): only newly created skills, in plain language.
     """
     mode = str(notification_mode or "on").lower()
     if mode == "off":
         return []
     verbose = mode == "verbose"
+    new_skills_only = mode == "new_skills"
 
     existing_tool_call_ids = set()
     existing_tool_contents = set()
@@ -476,6 +510,11 @@ def summarize_background_review_actions(
             detail = {}
         target = data.get("target", "") or detail.get("target", "")
         is_skill = detail.get("tool") == "skill_manage"
+
+        if new_skills_only:
+            if is_skill and detail.get("action") == "create":
+                actions.append(_friendly_new_skill(detail))
+            continue
 
         message_lower = message.lower()
         if not verbose:
@@ -910,16 +949,13 @@ def _run_review_in_thread(
             actions = []
 
         if actions:
-            summary = " · ".join(dict.fromkeys(actions))
-            agent._safe_print(
-                f"  💾 Self-improvement review: {summary}"
-            )
+            notice = format_background_review_notice(
+                actions, getattr(agent, "memory_notifications", "on"))
+            agent._safe_print(f"  {notice}")
             _bg_cb = agent.background_review_callback
             if _bg_cb:
                 try:
-                    _bg_cb(
-                        f"💾 Self-improvement review: {summary}"
-                    )
+                    _bg_cb(notice)
                 except Exception:
                     pass
 
