@@ -123,6 +123,15 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
         display.update(wanted)
         dirty = True
 
+    # ---------- 4c) no double confirm for /new ----------
+    # The app's "New chat" already asks "Start a new chat?" before sending
+    # /new; hermes asking again ("⚠️ Confirm /new … reply /approve") is
+    # redundant. The app doesn't expose /reset, /undo or /clear.
+    approvals = data.setdefault("approvals", {})
+    if approvals.get("destructive_slash_confirm") is not False:
+        approvals["destructive_slash_confirm"] = False
+        dirty = True
+
 # ---------- 5) realign cron jobs' model snapshot ----------
 # create_job() snapshots the default model; when the platform switches models
 # (HERMES_DEFAULT_MODEL), unpinned jobs then hit the drift guard and are
