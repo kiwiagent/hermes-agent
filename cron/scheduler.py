@@ -140,6 +140,84 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     return f"⚠️ Cron '{job_name}' failed: {cleaned}"
 
 
+# kiwiagent: cron.friendly_failures — end users (SmartBuddy) are not operators.
+# Notify on the first failure of a streak only, auto-pause after this many
+# consecutive failures, and never show raw errors/paths/model names.
+_FRIENDLY_FAILURE_PAUSE_AFTER = 3
+
+_CJK_RE = re.compile(r"[一-鿿]")
+_MISSING_FILE_RE = re.compile(r"script not found|no such file|file not found", re.IGNORECASE)
+# Failures the user can't act on: model/provider/network on the platform side.
+_PLATFORM_SIDE_RE = re.compile(
+    r"\b(4\d\d|5\d\d)\b|rate limit|usage limit|quota|timeout|timed out|"
+    r"model|provider|unintended spend|connection|authenticat|authoriz",
+    re.IGNORECASE,
+)
+
+
+def _cron_friendly_failures_enabled() -> bool:
+    try:
+        return bool((load_config() or {}).get("cron", {}).get("friendly_failures", False))
+    except Exception:
+        return False
+
+
+def _friendly_cron_failure_message(job: dict, error: str | None, *, paused: bool = False) -> str:
+    """Plain-language failure notice for end users (no raw error text).
+
+    Chinese when the job's name/prompt is Chinese, English otherwise.
+    """
+    name = job.get("name") or job.get("id") or "scheduled task"
+    zh = bool(_CJK_RE.search(f"{job.get('name') or ''}{job.get('prompt') or ''}"))
+    recurring = (job.get("schedule") or {}).get("kind") != "once"
+    text = error or ""
+
+    if paused:
+        if zh:
+            return (f"「{name}」连续 {_FRIENDLY_FAILURE_PAUSE_AFTER} 次没能运行，为了不一直打扰你，"
+                    f"我先把它暂停了。想恢复就跟我说\"恢复{name}\"，或者让我帮你修好它。")
+        return (f"\"{name}\" failed {_FRIENDLY_FAILURE_PAUSE_AFTER} times in a row, so I've paused it "
+                f"to stop sending you errors. Say \"resume {name}\" when you want it back, "
+                f"or ask me to fix it.")
+
+    if _MISSING_FILE_RE.search(text):
+        if zh:
+            return f"定时任务「{name}」没能运行：它需要的一个文件找不到了。直接告诉我你想让它做什么，我帮你重新设置。"
+        return (f"Your scheduled task \"{name}\" couldn't run because a file it needs is missing. "
+                f"Tell me what you'd like it to do and I'll set it up again.")
+
+    if zh:
+        retry = "下次到点我会再试。" if recurring else "需要的话跟我说，我帮你重新设置。"
+    else:
+        retry = ("I'll try again at the next scheduled time." if recurring
+                 else "Let me know if you'd like me to set it up again.")
+
+    if _PLATFORM_SIDE_RE.search(text):
+        if zh:
+            return f"「{name}」刚才没能运行，是我这边临时出了点问题。{retry}"
+        return f"\"{name}\" didn't run just now because of a temporary problem on my side. {retry}"
+
+    if zh:
+        return f"「{name}」这次没有成功运行。{retry}如果一直这样，跟我说\"帮我检查一下{name}\"。"
+    return (f"\"{name}\" didn't run successfully this time. {retry} "
+            f"If it keeps happening, ask me to check \"{name}\".")
+
+
+def _friendly_failure_delivery(job: dict, error: str | None) -> tuple[str, bool]:
+    """Return (content_to_deliver, should_pause) for a failed run.
+
+    ``job["failure_streak"]`` is the streak BEFORE this run. Empty content
+    means stay silent (the user was already told about this streak).
+    """
+    streak = int(job.get("failure_streak") or 0) + 1
+    recurring = (job.get("schedule") or {}).get("kind") != "once"
+    if recurring and streak >= _FRIENDLY_FAILURE_PAUSE_AFTER:
+        return _friendly_cron_failure_message(job, error, paused=True), True
+    if streak == 1:
+        return _friendly_cron_failure_message(job, error), False
+    return "", False
+
+
 class CronPromptInjectionBlocked(Exception):
     """Raised by _build_job_prompt when the fully-assembled prompt trips the
     injection scanner. Caught in run_job so the operator sees a clean
@@ -277,7 +355,7 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run, claim_dispatch, heartbeat_run_claim
+from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run, claim_dispatch, heartbeat_run_claim, pause_job
 from cron.executions import create_execution, finish_execution, mark_execution_running
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
@@ -3792,6 +3870,7 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
         # deferred agent is still torn down. Otherwise the outer `except` would
         # swallow the error and leak the agent's subprocesses/clients (#10200).
         delivery_error = None
+        pause_after_mark = False
         try:
             output_file = save_job_output(job["id"], output)
             if verbose:
@@ -3814,7 +3893,12 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             # Deliver the final response to the origin/target chat.
             # If the agent responded with [SILENT], skip delivery (but
             # output is already saved above).  Failed jobs always deliver.
-            deliver_content = final_response if success else _summarize_cron_failure_for_delivery(job, error)
+            if success:
+                deliver_content = final_response
+            elif _cron_friendly_failures_enabled():
+                deliver_content, pause_after_mark = _friendly_failure_delivery(job, error)
+            else:
+                deliver_content = _summarize_cron_failure_for_delivery(job, error)
             # Treat whitespace-only final responses the same as empty
             # responses: do not deliver a blank message, and let the
             # empty-response guard below mark the run as a soft failure.
@@ -3851,6 +3935,8 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
 
         if not _consume_interrupted_flag(job["id"]):
             mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+            if pause_after_mark:
+                pause_job(job["id"], reason=f"auto-paused after {_FRIENDLY_FAILURE_PAUSE_AFTER} consecutive failures")
         finish_execution(execution_id, success=success, error=error)
         return True
 
