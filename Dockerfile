@@ -295,7 +295,9 @@ ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 # check. (A separate launcher hardening is tracked independently.)
 ENV HERMES_TUI_DIR=/opt/hermes/ui-tui
 ENV HERMES_HOME=/opt/data
-ENV HERMES_WRITE_SAFE_ROOT=/opt/data
+# kiwiagent: also /tmp — agents write scratch scripts there; /opt/data only
+# made those writes fail ("File-mutation verifier" footers in chat).
+ENV HERMES_WRITE_SAFE_ROOT=/opt/data:/tmp
 ENV HERMES_DISABLE_LAZY_INSTALLS=1
 # The published image seals /opt/hermes (root-owned, read-only) so a runtime
 # lazy install can't mutate the agent's own venv and brick it. But opt-in
