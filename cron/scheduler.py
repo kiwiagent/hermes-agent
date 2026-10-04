@@ -159,6 +159,84 @@ def _failure_streak_nudge(job: dict) -> str:
     )
 
 
+# kiwiagent: cron.friendly_failures — end users (SmartBuddy) are not operators.
+# Notify on the first failure of a streak only, auto-pause after this many
+# consecutive failures, and never show raw errors/paths/model names.
+_FRIENDLY_FAILURE_PAUSE_AFTER = 3
+
+_CJK_RE = re.compile(r"[一-鿿]")
+_MISSING_FILE_RE = re.compile(r"script not found|no such file|file not found", re.IGNORECASE)
+# Failures the user can't act on: model/provider/network on the platform side.
+_PLATFORM_SIDE_RE = re.compile(
+    r"\b(4\d\d|5\d\d)\b|rate limit|usage limit|quota|timeout|timed out|"
+    r"model|provider|unintended spend|connection|authenticat|authoriz",
+    re.IGNORECASE,
+)
+
+
+def _cron_friendly_failures_enabled() -> bool:
+    try:
+        return bool((load_config() or {}).get("cron", {}).get("friendly_failures", False))
+    except Exception:
+        return False
+
+
+def _friendly_cron_failure_message(job: dict, error: str | None, *, paused: bool = False) -> str:
+    """Plain-language failure notice for end users (no raw error text).
+
+    Chinese when the job's name/prompt is Chinese, English otherwise.
+    """
+    name = job.get("name") or job.get("id") or "scheduled task"
+    zh = bool(_CJK_RE.search(f"{job.get('name') or ''}{job.get('prompt') or ''}"))
+    recurring = (job.get("schedule") or {}).get("kind") != "once"
+    text = error or ""
+
+    if paused:
+        if zh:
+            return (f"「{name}」连续 {_FRIENDLY_FAILURE_PAUSE_AFTER} 次没能运行，为了不一直打扰你，"
+                    f"我先把它暂停了。想恢复就跟我说\"恢复{name}\"，或者让我帮你修好它。")
+        return (f"\"{name}\" failed {_FRIENDLY_FAILURE_PAUSE_AFTER} times in a row, so I've paused it "
+                f"to stop sending you errors. Say \"resume {name}\" when you want it back, "
+                f"or ask me to fix it.")
+
+    if _MISSING_FILE_RE.search(text):
+        if zh:
+            return f"定时任务「{name}」没能运行：它需要的一个文件找不到了。直接告诉我你想让它做什么，我帮你重新设置。"
+        return (f"Your scheduled task \"{name}\" couldn't run because a file it needs is missing. "
+                f"Tell me what you'd like it to do and I'll set it up again.")
+
+    if zh:
+        retry = "下次到点我会再试。" if recurring else "需要的话跟我说，我帮你重新设置。"
+    else:
+        retry = ("I'll try again at the next scheduled time." if recurring
+                 else "Let me know if you'd like me to set it up again.")
+
+    if _PLATFORM_SIDE_RE.search(text):
+        if zh:
+            return f"「{name}」刚才没能运行，是我这边临时出了点问题。{retry}"
+        return f"\"{name}\" didn't run just now because of a temporary problem on my side. {retry}"
+
+    if zh:
+        return f"「{name}」这次没有成功运行。{retry}如果一直这样，跟我说\"帮我检查一下{name}\"。"
+    return (f"\"{name}\" didn't run successfully this time. {retry} "
+            f"If it keeps happening, ask me to check \"{name}\".")
+
+
+def _friendly_failure_delivery(job: dict, error: str | None) -> tuple[str, bool]:
+    """Return (content_to_deliver, should_pause) for a failed run.
+
+    ``job["failure_streak"]`` is the streak BEFORE this run. Empty content
+    means stay silent (the user was already told about this streak).
+    """
+    streak = int(job.get("failure_streak") or 0) + 1
+    recurring = (job.get("schedule") or {}).get("kind") != "once"
+    if recurring and streak >= _FRIENDLY_FAILURE_PAUSE_AFTER:
+        return _friendly_cron_failure_message(job, error, paused=True), True
+    if streak == 1:
+        return _friendly_cron_failure_message(job, error), False
+    return "", False
+
+
 def _detect_gateway_code_skew() -> tuple[str, str] | None:
     """Boot-vs-disk revision skew for THIS process, or None. Test seam over
     ``gateway.code_skew.detect_code_skew``; a broken import must never take delivery down."""
@@ -513,7 +591,7 @@ def _resolve_job_reasoning_config(job: dict, cfg: dict, model: str) -> dict | No
 from cron.jobs import (
     _ensure_cron_dir, advance_next_runs, claim_dispatch, claim_job_for_fire, fire_claim_fence,
     clear_run_claim, get_due_jobs, heartbeat_fire_claim, heartbeat_run_claim, mark_job_run,
-    save_job_output, self_removal_delivery_allowed, self_removal_delivery_scope, use_cron_store)
+    pause_job, save_job_output, self_removal_delivery_allowed, self_removal_delivery_scope, use_cron_store)
 from cron import store_health
 from cron.execution_identity import enter_cron_execution, exit_cron_execution
 from cron.executions import (
@@ -2952,6 +3030,12 @@ def _compose_run_delivery(
         )
         if incident_acked:
             deliver_content = ""
+        elif _cron_friendly_failures_enabled():
+            # kiwiagent: plain words, once per failure streak; the caller pauses
+            # the job after mark_job_run when the streak reaches the limit.
+            deliver_content, pause = _friendly_failure_delivery(job, error)
+            if pause:
+                job["_friendly_pause"] = True
         elif agent_declared:
             # The agent already diagnosed the failure in prose; the summarizer's substring
             # heuristics would re-diagnose it ("timed out" -> blame the model service, "401" ->
@@ -3180,6 +3264,8 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
     # A run that removed its own record has nothing left to mark; the delivery above is its result.
     marked = self_removal_delivery_allowed(job["id"]) or mark_job_run(
         job["id"], d.success, d.error, **mark_kwargs)
+    if marked and job.pop("_friendly_pause", False):
+        pause_job(job["id"], reason=f"auto-paused after {_FRIENDLY_FAILURE_PAUSE_AFTER} consecutive failures")
     if fire_owner is not None and not marked:
         finish_execution(
             execution_id, success=False,
@@ -3204,6 +3290,16 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
     return True
 
 
+def _crash_failure_text(job: dict, err_text: str) -> str:
+    """The crash notice: kiwiagent's plain-words version when cron.friendly_failures is on."""
+    if not _cron_friendly_failures_enabled():
+        return _summarize_cron_failure_for_delivery(job, err_text) + _failure_streak_nudge(job)
+    content, pause = _friendly_failure_delivery(job, err_text)
+    if pause:
+        job["_friendly_pause"] = True
+    return content
+
+
 def _deliver_crash_failure(
     job: dict, err_text: str, *, adapters, loop,
 ) -> tuple[Optional[str], str]:
@@ -3219,7 +3315,7 @@ def _deliver_crash_failure(
             job,
             # Same text as the normal failure delivery: this run also counts toward
             # failure_streak, so the nudge must leave through here too.
-            _summarize_cron_failure_for_delivery(job, err_text) + _failure_streak_nudge(job),
+            _crash_failure_text(job, err_text),
             adapters=adapters,
             loop=loop,
             for_failure=True,
@@ -3493,7 +3589,8 @@ def _run_one_job_body(
                 if is_retry_run(job):
                     # A crashed ladder re-run: its occurrence already counted toward repeat.
                     mark_kwargs["ladder_rung"] = True
-                mark_job_run(job["id"], False, _err_text, **mark_kwargs)
+                if mark_job_run(job["id"], False, _err_text, **mark_kwargs) and job.pop("_friendly_pause", False):
+                    pause_job(job["id"], reason=f"auto-paused after {_FRIENDLY_FAILURE_PAUSE_AFTER} consecutive failures")
         except Exception as record_err:
             # Never let bookkeeping mask the original interruption.
             logger.error("Failed to record interrupted run for job %s: %s", job["id"], record_err)

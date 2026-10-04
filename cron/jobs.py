@@ -2200,6 +2200,8 @@ def resume_job(job_id: str) -> Optional[dict[str, Any]]:
         "paused_at": None,
         "paused_reason": None,
         "next_run_at": next_run_at,
+        # kiwiagent: a resumed job starts a fresh streak, so its next failure notifies again.
+        "failure_streak": 0,
     })
 
 
