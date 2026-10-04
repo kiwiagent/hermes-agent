@@ -98,6 +98,28 @@ class TestChatDisplayConfig:
         assert "display" not in _config(home)
 
 
+class TestNoDoubleConfirm:
+    """The app's New chat already asks "Start a new chat?" before sending /new;
+    hermes asking again ("⚠️ Confirm /new … reply /approve") is redundant."""
+
+    def test_smartbuddy_pod_DisablesDestructiveSlashConfirm(self, home):
+        _run(home)
+
+        assert _config(home)["approvals"]["destructive_slash_confirm"] is False
+
+    def test_smartbuddy_pod_KeepsOtherApprovalKeys(self, home):
+        (home / "config.yaml").write_text(yaml.safe_dump({"model": {}, "approvals": {"mode": "manual"}}))
+
+        _run(home)
+
+        assert _config(home)["approvals"]["mode"] == "manual"
+
+    def test_non_smartbuddy_pod_LeavesApprovalsAlone(self, home):
+        _run(home, SMARTBUDDY_AGENT_ID=None)
+
+        assert "approvals" not in _config(home)
+
+
 class TestCronModelSnapshotRealign:
     def test_unpinned_job_with_stale_snapshot_IsRealignedToCurrentModel(self, home):
         _write_jobs(home, [{"id": "a", "name": "Ballet", "model": None, "model_snapshot": "qwen-plus"}])
