@@ -11,6 +11,7 @@ import copy
 import json
 import logging
 import os
+import re
 import threading
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
@@ -697,6 +698,50 @@ def _action_lines(data: dict, detail: dict, verbose: bool) -> list[str]:
     return [t("display.review.label_updated", label=label)] if hit else []
 
 
+_SKILL_DESCRIPTION_RE = re.compile(r"^description:\s*(.+?)\s*$", re.MULTILINE)
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _friendly_new_skill(name: str, content: str) -> str:
+    """kiwiagent: plain-language "learned a new skill" line for end users,
+    using the SKILL.md frontmatter description (Chinese if it is Chinese)."""
+    name = name or "new skill"
+    match = _SKILL_DESCRIPTION_RE.search(content or "")
+    description = match.group(1).strip().strip("\"'") if match else ""
+    if len(description) > 140:
+        description = description[:137].rstrip() + "…"
+    if _CJK_RE.search(description):
+        about = f"——{description.rstrip('。')}" if description else ""
+        return f"🧠 我学会了一个新技能：{name}{about}。下次遇到类似的事我会自动用上。"
+    about = f" — {description.rstrip('.')}" if description else ""
+    return f"🧠 I learned a new skill: {name}{about}. I'll use it automatically next time."
+
+
+def _new_skill_lines(data: dict, detail: dict) -> list[str]:
+    """kiwiagent ``new_skills`` mode: only skills that were really created."""
+    if detail.get("tool") != "skill_manage" or data.get("staged"):
+        return []
+    if "results" in data:
+        if not data.get("operations_applied") or not isinstance(data.get("results"), list):
+            return []
+        contents = {op.get("name"): op.get("content") or "" for op in detail.get("operations") or []
+                    if isinstance(op, dict) and op.get("action") == "create"}
+        return [_friendly_new_skill(r["name"], contents.get(r["name"], "")) for r in data["results"]
+                if isinstance(r, dict) and r.get("success") is True and r.get("action") == "create"
+                and r.get("name")]
+    if detail.get("action") == "create":
+        return [_friendly_new_skill(detail.get("name") or "", detail.get("content") or "")]
+    return []
+
+
+def format_background_review_notice(actions: list[str], notification_mode: str) -> Optional[str]:
+    """kiwiagent: ``new_skills`` lines are already user-facing, so they go out as-is
+    (no "Self-improvement review" prefix); None = the upstream format."""
+    if str(notification_mode or "").lower() != "new_skills":
+        return None
+    return "\n".join(dict.fromkeys(actions))
+
+
 def summarize_background_review_actions(
     review_messages: list[dict], prior_snapshot: list[dict], notification_mode: str = "on"
 ) -> list[str]:
@@ -704,7 +749,8 @@ def summarize_background_review_actions(
     skill-management tool results from the review agent's messages, skipping tool messages already
     present in ``prior_snapshot`` so inherited results are not re-surfaced as fresh work.
     ``notification_mode``: ``off`` -> no actions; ``on`` -> generic "Memory updated"/tool messages;
-    ``verbose`` -> content previews from the tool-call arguments.
+    ``verbose`` -> content previews from the tool-call arguments; ``new_skills`` (kiwiagent) ->
+    only newly created skills, in plain language.
 
     See #14944.
     """
@@ -712,6 +758,7 @@ def summarize_background_review_actions(
     if mode == "off":
         return []
     verbose = mode == "verbose"
+    new_skills_only = mode == "new_skills"
     existing_tool_call_ids, existing_tool_contents = _prior_tool_keys(prior_snapshot)
     all_tool_call_ids, call_details = _collect_review_call_details(review_messages)
     actions: list[str] = []
@@ -729,6 +776,9 @@ def summarize_background_review_actions(
         # Wrapper MCP servers may return a top-level list/scalar; only dict payloads carry
         # ``success``/``_change``.
         if not isinstance(data, dict) or not data.get("success"):
+            continue
+        if new_skills_only:
+            actions.extend(_new_skill_lines(data, call_details.get(tcid) or {}))
             continue
         actions.extend(_action_lines(data, call_details.get(tcid) or {}, verbose))
     return actions
@@ -1201,6 +1251,13 @@ def _run_review_fork(
 
 
 def _publish_review_summary(agent: Any, actions: list[str]) -> None:
+    notice = format_background_review_notice(actions, getattr(agent, "memory_notifications", "on"))
+    if notice is not None:
+        agent._safe_print(f"  {notice}")
+        if agent.background_review_callback:
+            with suppress(Exception):
+                agent.background_review_callback(notice)
+        return
     summary = " · ".join(dict.fromkeys(actions))
     agent._safe_print(t("display.review.summary_cli", summary=summary))
     if agent.background_review_callback:

@@ -111,13 +111,14 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
         dirty = True
 
     # ---------- 4b) chat display for end users ----------
-    # No operator notices in the chat: "💾 Self-improvement review: …" (the
-    # background review still runs) and "⚡ Interrupting current task
+    # No operator notices in the chat: memory updates / skill patches from the
+    # background review are silent; only a NEWLY created skill is announced,
+    # in plain language (memory_notifications=new_skills). Also no "⚡ Interrupting current task
     # (iteration n/90)…" (the app shows its own typing indicator). A follow-up
     # sent while busy steers the running task instead of aborting it — the
     # app's Stop button is the explicit way to interrupt.
     display = data.setdefault("display", {})
-    wanted = {"memory_notifications": "off", "busy_ack_enabled": False, "busy_input_mode": "steer"}
+    wanted = {"memory_notifications": "new_skills", "busy_ack_enabled": False, "busy_input_mode": "steer"}
     if any(display.get(k) != v for k, v in wanted.items()):
         display.update(wanted)
         dirty = True

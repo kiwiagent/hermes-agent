@@ -72,7 +72,8 @@ class TestCronDeliveryConfig:
 
 
 class TestChatDisplayConfig:
-    """End users shouldn't see operator notices ("💾 Self-improvement review",
+    """End users shouldn't see operator notices ("💾 Self-improvement review"
+    for memory updates / skill patches — new skills are still announced),
     "⚡ Interrupting current task (iteration 4/90)"), and a follow-up message
     should steer the running task instead of aborting it."""
 
@@ -80,7 +81,7 @@ class TestChatDisplayConfig:
         _run(home)
 
         display = _config(home)["display"]
-        assert display["memory_notifications"] == "off"
+        assert display["memory_notifications"] == "new_skills"
         assert display["busy_ack_enabled"] is False
         assert display["busy_input_mode"] == "steer"
 
