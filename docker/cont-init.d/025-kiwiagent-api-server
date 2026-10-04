@@ -101,10 +101,41 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
         tts["provider"] = "smartbuddy"
         dirty = True
 
+    # ---------- 4) cron delivery for end users ----------
+    # Drop the operator-style "Cronjob Response / job_id" wrapper and use
+    # friendly failure notices (notify once, auto-pause; see cron/scheduler.py).
+    cron = data.setdefault("cron", {})
+    if cron.get("wrap_response") is not False or cron.get("friendly_failures") is not True:
+        cron["wrap_response"] = False
+        cron["friendly_failures"] = True
+        dirty = True
+
+# ---------- 5) realign cron jobs' model snapshot ----------
+# create_job() snapshots the default model; when the platform switches models
+# (HERMES_DEFAULT_MODEL), unpinned jobs then hit the drift guard and are
+# skipped forever (2026-10: qwen-plus -> deepseek-flash broke reminders).
+# On SaaS pods the platform owns the model, so follow it. Runs before the
+# scheduler starts, so no lock contention.
+if litellm_url:
+    jobs_path = cfg_path.parent / "cron" / "jobs.json"
+    if jobs_path.exists():
+        import json
+        store = json.loads(jobs_path.read_text())
+        jobs = store.get("jobs", []) if isinstance(store, dict) else store
+        realigned = 0
+        for job in jobs:
+            snapshot = job.get("model_snapshot")
+            if snapshot and not (job.get("model") or "").strip() and snapshot != default_model:
+                job["model_snapshot"] = default_model
+                realigned += 1
+        if realigned:
+            jobs_path.write_text(json.dumps(store, indent=2, ensure_ascii=False))
+            print(f"[025-kiwiagent] cron: realigned {realigned} job(s) to model={default_model}")
+
 if not dirty:
     sys.exit(0)
 
 cfg_path.write_text(yaml.safe_dump(data, sort_keys=False))
 tag = api_key[-6:] if api_key else "-"
-print(f"[025-kiwiagent] config patched (api_server key tail=***{tag}, model={data.get('model',{}).get('default','?')}, plugins={data.get('plugins',{}).get('enabled',[])}, tts={data.get('tts',{}).get('provider','-')})")
+print(f"[025-kiwiagent] config patched (api_server key tail=***{tag}, model={data.get('model',{}).get('default','?')}, plugins={data.get('plugins',{}).get('enabled',[])}, tts={data.get('tts',{}).get('provider','-')}, cron={data.get('cron',{})})")
 PY
