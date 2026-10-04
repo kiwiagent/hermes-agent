@@ -1468,6 +1468,8 @@ def resume_job(job_id: str) -> Optional[Dict[str, Any]]:
             "paused_at": None,
             "paused_reason": None,
             "next_run_at": next_run_at,
+            # A resumed job starts a fresh streak, so its next failure notifies again.
+            "failure_streak": 0,
         },
     )
 
@@ -1531,6 +1533,9 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 job["last_run_at"] = now
                 job["last_status"] = "ok" if success else "error"
                 job["last_error"] = error if not success else None
+                # kiwiagent: consecutive-failure count, drives
+                # cron.friendly_failures (notify once, then auto-pause).
+                job["failure_streak"] = 0 if success else int(job.get("failure_streak") or 0) + 1
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
                 # Clear any external-fire claim so a re-armed recurring job can
