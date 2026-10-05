@@ -122,6 +122,12 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
     if any(display.get(k) != v for k, v in wanted.items()):
         display.update(wanted)
         dirty = True
+    # One "still working" notice per task, at 5 minutes (the plugin drops the
+    # repeats — it can't edit messages, so each would be a new push).
+    agent_cfg = data.setdefault("agent", {})
+    if agent_cfg.get("gateway_notify_interval") != 300:
+        agent_cfg["gateway_notify_interval"] = 300
+        dirty = True
 
     # ---------- 4c) no double confirm for /new ----------
     # The app's "New chat" already asks "Start a new chat?" before sending
