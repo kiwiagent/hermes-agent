@@ -802,3 +802,32 @@ class TestGithubExemptionAbuse:
         assert _scan_cron_prompt(
             "generate a keypair and explain id_rsa vs id_ed25519"
         ) == ""
+
+
+from tools.cronjob_job_args import _validate_cron_script_path  # noqa: E402
+
+
+class TestValidateCronScriptPathHint:
+    """kiwiagent: the rejection hint names the real scripts directory and the
+    filename to use. SmartBuddy pods run with HERMES_HOME=/opt/data; a buddy
+    that followed a wrong hint moved its script and the job later failed."""
+
+    def test_absolute_path_HintNamesActualScriptsDirAndFilename(self, tmp_path, monkeypatch):
+        home = tmp_path / "data"
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+        err = _validate_cron_script_path(f"{home}/scripts/med_reminder.sh")
+
+        assert err is not None
+        assert str(home / "scripts") in err
+        assert "~/.hermes" not in err
+        assert "e.g. 'med_reminder.sh'" in err
+
+    def test_bare_filename_IsAccepted(self, tmp_path, monkeypatch):
+        home = tmp_path / "data"
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        (home / "scripts").mkdir(parents=True)
+        (home / "scripts" / "med_reminder.sh").write_text("echo hi\n")
+
+        assert _validate_cron_script_path("med_reminder.sh") is None
+

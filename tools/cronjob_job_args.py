@@ -423,10 +423,12 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
     raw = script.strip()
     scripts_dir = get_hermes_home() / "scripts"
     if raw.startswith(("/", "~")) or (len(raw) >= 2 and raw[1] == ":"):
+        # kiwiagent: show the filename to use; agents follow the hint literally.
+        example = raw.replace("\\", "/").rsplit("/", 1)[-1] or "my_script.py"
         return (
             f"Script path must be relative to {scripts_dir}/. "
             f"Got absolute or home-relative path: {raw!r}. "
-            f"Place scripts in {scripts_dir}/ and use just the filename.")
+            f"Place scripts in {scripts_dir}/ and use just the filename, e.g. {example!r}.")
 
     from tools.path_security import validate_within_dir
     scripts_dir.mkdir(parents=True, exist_ok=True)
