@@ -91,6 +91,40 @@ class TestHttpWrites:
         assert detect_outbound_action(text)[0] is False
 
 
+class TestNotionReadOnly:
+    """Notion's search / query APIs are POSTs that only read. Scripts usually
+    build the URL from a base (f"{API_URL}/search"), so the full URL never
+    appears as one string."""
+
+    def test_search_with_built_url_not_outbound(self):
+        text = (
+            'API_URL = "https://api.notion.com/v1"\n'
+            'req = urllib.request.Request(\n    f"{API_URL}/search",\n'
+            '    data=json.dumps(body).encode(), headers=h,\n    method=\'POST\'\n)\n'
+            'with urllib.request.urlopen(req) as r:\n    pages = json.load(r)["results"]\n'
+        )
+        assert detect_outbound_action(text)[0] is False
+
+    def test_database_query_with_built_url_not_outbound(self):
+        text = (
+            'BASE = "https://api.notion.com/v1"\n'
+            'requests.post(f"{BASE}/databases/{db_id}/query", headers=h, json={})\n'
+        )
+        assert detect_outbound_action(text)[0] is False
+
+    @pytest.mark.parametrize("text", [
+        'BASE = "https://api.notion.com/v1"\nrequests.post(f"{BASE}/pages", json=page)',
+        'BASE = "https://api.notion.com/v1"\nrequests.post(f"{BASE}/search", json={})\n'
+        'requests.patch(f"{BASE}/pages/{pid}", json={"archived": True})',
+        'BASE = "https://api.notion.com/v1"\nrequests.post(f"{BASE}/comments", json=c)',
+        'BASE = "https://api.notion.com/v1"\nrequests.post(f"{BASE}/search")\n'
+        'requests.patch(f"{BASE}/blocks/{bid}/children", json=b)',
+    ])
+    def test_notion_writes_still_outbound(self, text):
+        found, key, desc = detect_outbound_action(text)
+        assert found and desc == "send data to api.notion.com"
+
+
 class TestCommandWithScriptFile:
     def test_script_file_contents_are_scanned(self, tmp_path):
         (tmp_path / "send_report.py").write_text(
