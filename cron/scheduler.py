@@ -180,6 +180,14 @@ def _friendly_cron_failure_message(job: dict, error: str | None, *, paused: bool
                 f"to stop sending you errors. Say \"resume {name}\" when you want it back, "
                 f"or ask me to fix it.")
 
+    if text.startswith("Outbound blocked:"):
+        if zh:
+            return (f"「{name}」需要替你对外发送内容，每次都要先经过你确认，所以这次没有自动执行。"
+                    f"想现在发的话跟我说一声，我会先把要发的内容给你看。")
+        return (f"\"{name}\" needs to send something on your behalf, and that always needs your OK "
+                f"— so it didn't run on its own. Tell me if you'd like to send it now and I'll "
+                f"show you exactly what goes out first.")
+
     if _MISSING_FILE_RE.search(text):
         # The agent set the job up wrong — own it, don't make the user re-explain.
         if zh:
@@ -2244,6 +2252,20 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         return False, f"Script not found: {path}"
     if not path.is_file():
         return False, f"Script path is not a file: {path}"
+
+    # kiwiagent: scheduled jobs never send anything out in the user's name
+    # (approvals.outbound_confirm) — no one is here to approve it.
+    try:
+        from tools.approval import _detect_outbound
+        outbound, _key, outbound_desc = _detect_outbound(
+            code=path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        outbound = False
+    if outbound:
+        return False, (
+            f"Outbound blocked: this script would {outbound_desc} on the user's "
+            "behalf, which needs their approval each time."
+        )
 
     script_timeout = _get_script_timeout()
 

@@ -2498,6 +2498,55 @@ def _get_approval_timeout() -> int:
         return 60
 
 
+def _outbound_confirm_enabled() -> bool:
+    """kiwiagent: approvals.outbound_confirm — anything sent out in the user's
+    name (email, messages, writes to external services) always asks the user.
+    SmartBuddy turns it on; off by default."""
+    return bool(_get_approval_config().get("outbound_confirm", False))
+
+
+def _detect_outbound(command: Optional[str] = None, code: Optional[str] = None):
+    """(found, key, description) when outbound_confirm is on, else no match."""
+    if not _outbound_confirm_enabled():
+        return False, None, None
+    from tools.outbound_guard import detect_outbound_action, detect_outbound_command
+    if code is not None:
+        return detect_outbound_action(code)
+    return detect_outbound_command(command or "")
+
+
+def _outbound_block_result(description: str, key: str) -> dict:
+    """No user can approve right now (cron / headless): never send; in a
+    scheduled job, deliver the draft to the user instead."""
+    if env_var_enabled("HERMES_CRON_SESSION"):
+        message = (
+            f"BLOCKED: this would {description} on the user's behalf. Nothing is "
+            "sent out without the user's approval, and no one is here to approve "
+            "it in a scheduled job. Do NOT send it any other way. Instead, put "
+            "the complete draft (recipient, subject and full text, or exactly "
+            "what would be submitted) in your final reply so the user receives "
+            "it, and tell them to reply \"send it\" if they want you to send it."
+        )
+    else:
+        message = (
+            f"BLOCKED: this would {description} on the user's behalf and needs "
+            "the user's approval, which can't be requested here. Do NOT send it "
+            "any other way; show the user the draft instead."
+        )
+    return {
+        "approved": False,
+        "message": message,
+        "pattern_key": key,
+        "description": description,
+        "outcome": "blocked",
+        "user_consent": False,
+    }
+
+
+def _is_outbound_key(key: str) -> bool:
+    return key.startswith("outbound:")
+
+
 def _get_cron_approval_mode() -> str:
     """Read the cron approval mode from config. Returns 'deny' or 'approve'."""
     try:
@@ -3224,7 +3273,10 @@ def check_all_command_guards(command: str, env_type: str,
     if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
         return {"approved": True, "message": None}
 
-    if _command_matches_permanent_allowlist(command):
+    # kiwiagent: sending something out in the user's name always asks.
+    outbound, outbound_key, outbound_desc = _detect_outbound(command=command)
+
+    if not outbound and _command_matches_permanent_allowlist(command):
         return {"approved": True, "message": None}
 
     is_cli = _is_interactive_cli()
@@ -3234,6 +3286,8 @@ def check_all_command_guards(command: str, env_type: str,
     # Preserve the existing non-interactive behavior: outside CLI/gateway/ask
     # flows, we do not block on approvals and we skip external guard work.
     if not is_cli and not is_gateway and not is_ask:
+        if outbound:
+            return _outbound_block_result(outbound_desc, outbound_key)
         # Cron sessions: respect cron_mode config
         if env_var_enabled("HERMES_CRON_SESSION"):
             if _get_cron_approval_mode() == "deny":
@@ -3369,6 +3423,10 @@ def check_all_command_guards(command: str, env_type: str,
         if not is_approved(session_key, pattern_key):
             warnings.append((pattern_key, description, False))
 
+    # Never pre-approved: every send is its own decision.
+    if outbound:
+        warnings.append((outbound_key, outbound_desc, False))
+
     # Nothing to warn about
     if not warnings:
         return {"approved": True, "message": None}
@@ -3378,7 +3436,7 @@ def check_all_command_guards(command: str, env_type: str,
     # Inspired by OpenAI Codex's Smart Approvals guardian subagent
     # (openai/codex#13860).
     smart_denied_for_owner = False
-    if approval_mode == "smart":
+    if approval_mode == "smart" and not outbound:
         combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
         observer_payload = _prepare_smart_approval_observer(
             command=command,
@@ -3447,7 +3505,7 @@ def check_all_command_guards(command: str, env_type: str,
                 "description": redact_sensitive_text(combined_desc),
                 # Smart DENY overrides are one-operation decisions, so the UI
                 # must not offer a permanent scope.
-                "allow_permanent": not has_tirith and not smart_denied_for_owner,
+                "allow_permanent": not has_tirith and not smart_denied_for_owner and not outbound,
             }
             if smart_denied_for_owner:
                 approval_data["smart_denied"] = True
@@ -3508,6 +3566,8 @@ def check_all_command_guards(command: str, env_type: str,
             # choices retain their existing persistence semantics.
             if not smart_denied_for_owner:
                 for key, _, is_tirith in warnings:
+                    if _is_outbound_key(key):
+                        continue
                     if choice == "session" or (choice == "always" and is_tirith):
                         approve_session(session_key, key)
                     elif choice == "always":
@@ -3599,6 +3659,8 @@ def check_all_command_guards(command: str, env_type: str,
     # persistence for manual mode and smart ESCALATE.
     if not smart_denied_for_owner:
         for key, _, is_tirith in warnings:
+            if _is_outbound_key(key):
+                continue
             if choice == "session" or (choice == "always" and is_tirith):
                 # tirith: session only (no permanent broad allowlisting)
                 approve_session(session_key, key)
@@ -3655,8 +3717,16 @@ def check_execute_code_guard(code: str, env_type: str,
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
 
+    # kiwiagent: a script that sends something out in the user's name always
+    # asks — never smart-approved, never covered by an earlier approval.
+    outbound, outbound_key, outbound_desc = _detect_outbound(code=code)
+    if outbound:
+        description = outbound_desc
+
     # Cron: no user is present to approve arbitrary code.
     if env_var_enabled("HERMES_CRON_SESSION"):
+        if outbound:
+            return _outbound_block_result(outbound_desc, outbound_key)
         if _get_cron_approval_mode() == "deny":
             return {
                 "approved": False,
@@ -3681,6 +3751,8 @@ def check_execute_code_guard(code: str, env_type: str,
     #     prompt would fire on every execute_code call.
     #   * Local non-interactive non-gateway: documented limitation above.
     if not is_gateway and not is_ask:
+        if outbound:
+            return _outbound_block_result(outbound_desc, outbound_key)
         return {"approved": True, "message": None}
 
     session_key = get_current_session_key()
@@ -3691,14 +3763,14 @@ def check_execute_code_guard(code: str, env_type: str,
     # Check session/permanent approval — same gate as check_all_command_guards.
     # Without this, "Approve session" / "Always" choices are stored but never
     # consulted, so every execute_code call re-prompts the user (#39275).
-    if is_approved(session_key, pattern_key):
+    if not outbound and is_approved(session_key, pattern_key):
         return {"approved": True, "message": None}
 
     # Smart mode: ask the aux LLM about the whole script. An APPROVE here only
     # suppresses the redundant whole-script prompt; the per-call terminal()
     # guards (restored by context propagation) still run independently.
     smart_denied_for_owner = False
-    if approval_mode == "smart":
+    if approval_mode == "smart" and not outbound:
         observer_payload = _prepare_smart_approval_observer(
             command=command,
             description=description,
@@ -3778,7 +3850,7 @@ def check_execute_code_guard(code: str, env_type: str,
         "pattern_key": pattern_key,
         "pattern_keys": [pattern_key],
         "description": display_description,
-        "allow_permanent": not smart_denied_for_owner,
+        "allow_permanent": not smart_denied_for_owner and not outbound,
     }
     if smart_denied_for_owner:
         approval_data["smart_denied"] = True
@@ -3824,7 +3896,7 @@ def check_execute_code_guard(code: str, env_type: str,
     # Never persist a smart-DENY override under the coarse execute_code key;
     # doing so would approve unrelated future scripts. Manual and ESCALATE
     # decisions preserve their existing session/permanent behavior.
-    if not smart_denied_for_owner:
+    if not smart_denied_for_owner and not outbound:
         if choice == "session":
             approve_session(session_key, pattern_key)
         elif choice == "always":
