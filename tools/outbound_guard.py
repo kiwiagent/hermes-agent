@@ -65,9 +65,14 @@ _INTERNAL_HOST_RE = re.compile(
     r"[\w.-]+\.svc(?:\.cluster\.local)?|[\w.-]+\.cluster\.local)$",
     re.IGNORECASE,
 )
-# POST endpoints that only read (search / query APIs).
-_READ_ONLY_POST_RE = re.compile(
-    r"api\.notion\.com/v1/(?:search\b|databases/[^/\s'\"]+/query\b)",
+# Notion's search / query APIs are POSTs that only read. Scripts usually build
+# the URL from a base (f"{API_URL}/search"), so look for the endpoint path and
+# for any write endpoint instead of one full URL.
+_NOTION_READ_RE = re.compile(
+    r"/(?:search|databases/[^/\s'\"]+/query)\b", re.IGNORECASE)
+_NOTION_WRITE_RE = re.compile(
+    r"\b(?:PATCH|DELETE)\b|\.(?:patch|delete)\s*\(|/children\b|"
+    r"/(?:pages|databases|comments)['\"]",
     re.IGNORECASE,
 )
 
@@ -103,9 +108,8 @@ def detect_outbound_action(text: str) -> OutboundMatch:
         external = [h for h in hosts if not _INTERNAL_HOST_RE.match(h)]
         if hosts and not external:
             return _NONE  # only talks to the platform itself
-        if external and _READ_ONLY_POST_RE.search(text) and all(
-            h == "api.notion.com" for h in external
-        ):
+        if (external and all(h == "api.notion.com" for h in external)
+                and _NOTION_READ_RE.search(text) and not _NOTION_WRITE_RE.search(text)):
             return _NONE
         target = external[0] if external else None
         return True, "outbound:http", (
