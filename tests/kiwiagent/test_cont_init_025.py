@@ -120,6 +120,25 @@ class TestNoDoubleConfirm:
         assert "approvals" not in _config(home)
 
 
+class TestLongRunningNotice:
+    def test_smartbuddy_pod_FirstNoticeAtFiveMinutes(self, home):
+        _run(home)
+
+        assert _config(home)["agent"]["gateway_notify_interval"] == 300
+
+    def test_smartbuddy_pod_KeepsOtherAgentKeys(self, home):
+        (home / "config.yaml").write_text(yaml.safe_dump({"model": {}, "agent": {"max_turns": 90}}))
+
+        _run(home)
+
+        assert _config(home)["agent"]["max_turns"] == 90
+
+    def test_non_smartbuddy_pod_LeavesAgentAlone(self, home):
+        _run(home, SMARTBUDDY_AGENT_ID=None)
+
+        assert "agent" not in _config(home)
+
+
 class TestMailOnlyThroughConnector:
     """himalaya / google-workspace would keep mail passwords inside the pod;
     SmartBuddy reads mail through the console (smartbuddy-mail skill)."""
