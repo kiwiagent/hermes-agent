@@ -131,14 +131,24 @@ class TestFriendlyDeliveryPolicy:
 # ---------------------------------------------------------------------------
 
 class TestFriendlyWording:
-    def test_missing_script_AsksUserToDescribeTask(self):
+    def test_missing_script_ApologisesAndOffersToFix(self):
         msg = s._friendly_cron_failure_message(
             _job(name="Gmail New Email Monitor"),
             "Script not found: /opt/data/scripts/check_gmail.py")
 
         assert "Gmail New Email Monitor" in msg
-        assert "missing" in msg
-        assert "/opt/data" not in msg
+        assert "didn't go off on time" in msg
+        assert "mistake I made" in msg
+        assert "set it up again" in msg
+        assert "file" not in msg and "/opt/data" not in msg
+
+    def test_missing_script_Chinese_ApologisesAndOffersToFix(self):
+        msg = s._friendly_cron_failure_message(
+            _job(name="吃药提醒（今天一次）", prompt="提醒我吃药", kind="once"),
+            "Script not found: /opt/data/scripts/med_reminder.sh")
+
+        assert msg == ("抱歉，「吃药提醒（今天一次）」没能按时提醒你，是我设置时出了错，不是你的问题。"
+                       "回复\"重新设置\"，我马上帮你修好。")
 
     @pytest.mark.parametrize("error", [
         "RuntimeError: HTTP 400: /chat/completions: Invalid model name passed in model=qwen-plus.",
