@@ -704,3 +704,31 @@ class TestValidateCronBaseUrl:
 
     def test_base_url_without_provider_rejected(self):
         assert self._v(None, "https://x.example/v1") is not None
+
+
+from tools.cronjob_tools import _validate_cron_script_path  # noqa: E402
+
+
+class TestValidateCronScriptPathHint:
+    """kiwiagent: the rejection hint must name the real scripts directory.
+
+    SmartBuddy pods run with HERMES_HOME=/opt/data, so ``~/.hermes/scripts/``
+    is the wrong place; a buddy that followed the old hint moved its script
+    there and the job later failed with "Script not found".
+    """
+
+    def test_absolute_path_HintNamesActualScriptsDir(self, tmp_path, monkeypatch):
+        home = tmp_path / "data"
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+        err = _validate_cron_script_path(f"{home}/scripts/med_reminder.sh")
+
+        assert err is not None
+        assert str(home / "scripts") in err
+        assert "~/.hermes" not in err
+        assert "med_reminder.sh" in err
+
+    def test_bare_filename_IsAccepted(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "data"))
+
+        assert _validate_cron_script_path("med_reminder.sh") is None

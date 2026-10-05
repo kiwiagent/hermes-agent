@@ -181,10 +181,11 @@ def _friendly_cron_failure_message(job: dict, error: str | None, *, paused: bool
                 f"or ask me to fix it.")
 
     if _MISSING_FILE_RE.search(text):
+        # The agent set the job up wrong — own it, don't make the user re-explain.
         if zh:
-            return f"定时任务「{name}」没能运行：它需要的一个文件找不到了。直接告诉我你想让它做什么，我帮你重新设置。"
-        return (f"Your scheduled task \"{name}\" couldn't run because a file it needs is missing. "
-                f"Tell me what you'd like it to do and I'll set it up again.")
+            return f"抱歉，「{name}」没能按时提醒你，是我设置时出了错，不是你的问题。回复\"重新设置\"，我马上帮你修好。"
+        return (f"Sorry — \"{name}\" didn't go off on time because of a mistake I made setting it up. "
+                f"Reply \"set it up again\" and I'll fix it.")
 
     if zh:
         retry = "下次到点我会再试。" if recurring else "需要的话跟我说，我帮你重新设置。"
