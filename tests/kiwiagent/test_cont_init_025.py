@@ -120,6 +120,35 @@ class TestNoDoubleConfirm:
         assert "approvals" not in _config(home)
 
 
+class TestMailOnlyThroughConnector:
+    """himalaya / google-workspace would keep mail passwords inside the pod;
+    SmartBuddy reads mail through the console (smartbuddy-mail skill)."""
+
+    def test_smartbuddy_pod_DisablesBundledMailSkills(self, home):
+        _run(home)
+
+        assert {"himalaya", "google-workspace"} <= set(_config(home)["skills"]["disabled"])
+
+    def test_smartbuddy_pod_KeepsOtherDisabledSkills_NoDuplicates(self, home):
+        (home / "config.yaml").write_text(yaml.safe_dump(
+            {"model": {}, "skills": {"disabled": ["yuanbao", "himalaya"]}}))
+
+        _run(home)
+        _run(home)
+
+        assert _config(home)["skills"]["disabled"] == ["yuanbao", "himalaya", "google-workspace"]
+
+    def test_smartbuddy_pod_EnablesOutboundConfirm(self, home):
+        _run(home)
+
+        assert _config(home)["approvals"]["outbound_confirm"] is True
+
+    def test_non_smartbuddy_pod_LeavesSkillsAlone(self, home):
+        _run(home, SMARTBUDDY_AGENT_ID=None)
+
+        assert "skills" not in _config(home)
+
+
 class TestCronModelSnapshotRealign:
     def test_unpinned_job_with_stale_snapshot_IsRealignedToCurrentModel(self, home):
         _write_jobs(home, [{"id": "a", "name": "Ballet", "model": None, "model_snapshot": "qwen-plus"}])

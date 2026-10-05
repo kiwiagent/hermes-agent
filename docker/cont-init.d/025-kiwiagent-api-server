@@ -140,6 +140,19 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
         approvals["outbound_confirm"] = True
         dirty = True
 
+    # ---------- 4e) mail only through the SmartBuddy connector ----------
+    # himalaya / google-workspace keep mail passwords or Google tokens inside
+    # the pod and would compete with the plugin's smartbuddy-mail skill
+    # (password stays in the console). Keep anything else already disabled.
+    skills = data.setdefault("skills", {})
+    disabled = skills.get("disabled") or []
+    if isinstance(disabled, str):
+        disabled = [disabled]
+    missing = [n for n in ("himalaya", "google-workspace") if n not in disabled]
+    if missing:
+        skills["disabled"] = list(disabled) + missing
+        dirty = True
+
 # ---------- 5) realign cron jobs' model snapshot ----------
 # create_job() snapshots the default model; when the platform switches models
 # (HERMES_DEFAULT_MODEL), unpinned jobs then hit the drift guard and are
