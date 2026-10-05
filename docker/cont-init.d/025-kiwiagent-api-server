@@ -132,6 +132,14 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
         approvals["destructive_slash_confirm"] = False
         dirty = True
 
+    # ---------- 4d) outbound actions always ask ----------
+    # "Every action needs your approval": email, messages to other people and
+    # writes to external services always prompt the user (never smart-
+    # approved); cron jobs never send — they deliver a draft instead.
+    if approvals.get("outbound_confirm") is not True:
+        approvals["outbound_confirm"] = True
+        dirty = True
+
 # ---------- 5) realign cron jobs' model snapshot ----------
 # create_job() snapshots the default model; when the platform switches models
 # (HERMES_DEFAULT_MODEL), unpinned jobs then hit the drift guard and are
