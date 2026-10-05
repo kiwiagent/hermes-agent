@@ -165,8 +165,17 @@ def _cron_friendly_failures_enabled() -> bool:
 def _friendly_cron_failure_message(job: dict, error: str | None, *, paused: bool = False) -> str:
     """Plain-language failure notice for end users (no raw error text).
 
-    Chinese when the job's name/prompt is Chinese, English otherwise.
+    Chinese when the job's name/prompt is Chinese (Traditional when it's
+    written in Traditional), English otherwise.
     """
+    text = _friendly_cron_failure_text(job, error, paused=paused)
+    from cron.zh_variants import is_traditional, to_traditional
+    if is_traditional(f"{job.get('name') or ''}{job.get('prompt') or ''}"):
+        return to_traditional(text)
+    return text
+
+
+def _friendly_cron_failure_text(job: dict, error: str | None, *, paused: bool = False) -> str:
     name = job.get("name") or job.get("id") or "scheduled task"
     zh = bool(_CJK_RE.search(f"{job.get('name') or ''}{job.get('prompt') or ''}"))
     recurring = (job.get("schedule") or {}).get("kind") != "once"

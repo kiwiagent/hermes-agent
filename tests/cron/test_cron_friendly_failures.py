@@ -197,3 +197,19 @@ class TestFriendlyWording:
 
         assert "暂停" in msg
         assert "恢复芭蕾课提醒" in msg
+
+
+class TestTraditionalChinese:
+    def test_traditional_job_GetsTraditionalNotice(self):
+        msg = s._friendly_cron_failure_message(
+            _job(name="吃藥提醒（每天）", prompt="提醒我吃藥"),
+            "Script not found: /opt/data/scripts/med.sh")
+
+        assert msg.startswith("抱歉，「吃藥提醒（每天）」沒能按時提醒你")
+        assert "回覆" in msg and "設置" in msg
+
+    def test_simplified_job_StaysSimplified(self):
+        msg = s._friendly_cron_failure_message(
+            _job(name="吃药提醒", prompt="提醒我吃药"), "Script not found: x")
+
+        assert "没能按时提醒你" in msg
