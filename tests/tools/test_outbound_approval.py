@@ -366,3 +366,73 @@ class TestCronAllowedHost:
 
         assert res["approved"] is False
         assert "draft" in res["message"].lower()
+
+
+# ---------------------------------------- always-allow needs literal targets
+
+NOTION_ALLOWED = "outbound:http:api.notion.com"
+LITERAL_CASES = {
+    "comment_then_variable": ("# https://api.notion.com/v1/pages\nimport requests\nrequests.post(url, json=p)\n", False),
+    "literal_plus_variable": ("import requests\nrequests.post('https://api.notion.com/v1/pages', json=p)\n"
+                              "requests.post(url, json=p)\n", False),
+    "two_literal_notion": ("import requests\nrequests.post('https://api.notion.com/v1/pages', json=p)\n"
+                           "requests.patch('https://api.notion.com/v1/pages/1', json=q)\n", True),
+    "fstring_literal_host": ('import requests\nrequests.post(f"https://api.notion.com/v1/pages/{pid}", json=p)\n', True),
+}
+LITERAL_IDS = sorted(LITERAL_CASES)
+
+
+def _as_command(tmp_path, monkeypatch, code):
+    (tmp_path / "job.py").write_text(code)
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+    return "python3 job.py"
+
+
+@pytest.mark.parametrize("case", LITERAL_IDS)
+class TestAllowedHostNeedsLiteralTargets:
+    def test_terminal(self, gw_session, allowlist, tmp_path, monkeypatch, case):
+        code, auto = LITERAL_CASES[case]
+        allowlist[0].add(NOTION_ALLOWED)
+        seen = _answer(gw_session, "deny")
+
+        res = A.check_all_command_guards(_as_command(tmp_path, monkeypatch, code), "local")
+
+        assert res["approved"] is auto
+        assert ("prompts" not in seen) is auto
+        if not auto:
+            assert seen["prompts"][0]["allow_permanent"] is False
+
+    def test_execute_code(self, gw_session, allowlist, monkeypatch, case):
+        code, auto = LITERAL_CASES[case]
+        allowlist[0].add(NOTION_ALLOWED)
+        # isolate the outbound decision from the generic execute_code prompt
+        monkeypatch.setattr(A, "_smart_approve", lambda c, d: "approve")
+        seen = _answer(gw_session, "deny")
+
+        res = A.check_execute_code_guard(code, "local")
+
+        assert res["approved"] is auto
+        if not auto:
+            assert seen["prompts"][0]["allow_permanent"] is False
+
+    def test_offer_always_only_for_literal(self, gw_session, allowlist, tmp_path, monkeypatch, case):
+        code, auto = LITERAL_CASES[case]
+        seen = _answer(gw_session, "once")
+
+        A.check_all_command_guards(_as_command(tmp_path, monkeypatch, code), "local")
+
+        assert seen["prompts"][0]["allow_permanent"] is auto
+
+    def test_cron(self, gw_session, allowlist, tmp_path, monkeypatch, case):
+        code, auto = LITERAL_CASES[case]
+        allowlist[0].add(NOTION_ALLOWED)
+        command = _as_command(tmp_path, monkeypatch, code)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+        monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "deny")
+
+        res = A.check_all_command_guards(command, "local")
+
+        assert res["approved"] is auto
+        if not auto:
+            assert "draft" in res["message"].lower()

