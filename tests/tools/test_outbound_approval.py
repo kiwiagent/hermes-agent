@@ -486,3 +486,36 @@ class TestRevokePermanent:
 
         assert A.check_all_command_guards(NOTION_CMD, "local")["approved"] is False
         assert len(seen["prompts"]) == 1
+
+
+# ------------------------------------ exemptions need literal write targets
+
+class TestExemptionsNeedLiteralTargets:
+    @pytest.mark.parametrize("code", [
+        "# http://localhost:8642/v1\nimport requests\nrequests.post(url, json=b)\n",
+        "# https://api.notion.com/v1/search\nimport requests\nrequests.post(url, json={})\n",
+        "await fetch(process.env.HOOK, {method: 'POST', body})\n// http://localhost:3000\n",
+    ])
+    def test_gateway_asks(self, gw_session, code):
+        seen = _answer(gw_session, "deny")
+
+        res = A.check_execute_code_guard(code, "local")
+
+        assert res["approved"] is False
+        assert len(seen["prompts"]) == 1
+
+    @pytest.mark.parametrize("name,code", [
+        ("job.py", "# http://localhost:8642/v1\nimport requests\nrequests.post(url, json=b)\n"),
+        ("job.mjs", "await fetch(process.env.HOOK, {method: 'POST', body})\n"),
+    ])
+    def test_cron_drafts(self, gw_session, tmp_path, monkeypatch, name, code):
+        (tmp_path / name).write_text(code)
+        monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+        monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "approve")
+
+        res = A.check_all_command_guards(f"node {name}" if name.endswith(".mjs") else f"python3 {name}", "local")
+
+        assert res["approved"] is False
+        assert "draft" in res["message"].lower()

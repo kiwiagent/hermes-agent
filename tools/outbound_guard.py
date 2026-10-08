@@ -19,7 +19,8 @@ import os
 import re
 import shlex
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
+from urllib.parse import urlsplit
 
 _FLAGS = re.IGNORECASE | re.MULTILINE
 
@@ -54,6 +55,10 @@ _HTTP_WRITE_PATTERNS = [
     r"\.(?:post|put|patch|delete)\s*\(\s*f?['\"]https?://",
     r"\bmethod\s*=\s*['\"](?:POST|PUT|PATCH|DELETE)['\"]",
     r"\burlopen\s*\([^)]*\bdata\s*=",
+    # JavaScript: fetch / axios / node http(s).request
+    r"\bmethod\s*:\s*['\"`](?:POST|PUT|PATCH|DELETE)['\"`]",
+    r"\bfetch\s*\([^)]*?\bmethod\s*:(?!\s*['\"`](?:GET|HEAD|OPTIONS)['\"`])",
+    r"\b(?:axios|got|ky|superagent|needle)\s*\.\s*(?:post|put|patch|delete)\s*\(",
 ]
 
 _EMAIL_RE = [re.compile(p, _FLAGS) for p in _EMAIL_PATTERNS]
@@ -83,28 +88,33 @@ _INTERNAL_HOST_RE = re.compile(
     re.IGNORECASE,
 )
 # Notion's search / query APIs are POSTs that only read. Scripts usually build
-# the URL from a base (f"{API_URL}/search"), so look for the endpoint path and
-# for any write endpoint instead of one full URL.
-_NOTION_READ_RE = re.compile(
-    r"/(?:search|databases/[^/\s'\"]+/query)\b", re.IGNORECASE)
+# the URL from a base (f"{API_URL}/search"), so each write's URL is resolved
+# through a base constant assigned once, then its path is checked.
+_NOTION_READ_PATH_RE = re.compile(
+    r"^/v1/(?:search|databases/[^/]+/query)/?$", re.IGNORECASE)
 _NOTION_WRITE_RE = re.compile(
     r"\b(?:PATCH|DELETE)\b|\.(?:patch|delete)\s*\(|/children\b|"
     r"/(?:pages|databases|comments)['\"]",
     re.IGNORECASE,
 )
 
-# --- Literal write targets (who an always-allowed host covers) ---------------
-# A host the user always-allowed covers a command only when EVERY write in it
-# has a literal target URL on that host. A URL elsewhere (a comment, a header,
-# an unrelated string) must never vouch for a write to a variable.
+# --- Literal write targets ----------------------------------------------------
+# An always-allowed host, the internal-host exemption and the Notion read-only
+# exemption only apply when EVERY write has a literal target URL. A URL
+# elsewhere (a comment, a header, an unrelated string) never vouches for a
+# write to a variable.
 _URL_HEAD_RE = re.compile(
-    r"^https?://(?:[^/@{}\s'\"]*@)?([A-Za-z0-9.-]+)(?::\d+)?(?:/|$)")
-_PY_WRITE_CALL_RE = re.compile(
-    r"(?P<generic>\.request\s*\()|(?P<urllib>\bRequest\s*\()|"
-    r"[\w)\]]*\.(?:post|put|patch|delete)\s*\(")
-_PY_LITERAL_ARG_RE = re.compile(
-    r"\s*(?:url\s*=\s*)?([rRuUfFbB]{0,2})(['\"])(https?://[^'\"\n]*)\2\s*(?:,|$)")
-_WRITE_METHOD_RE = re.compile(r"['\"](?:POST|PUT|PATCH|DELETE)['\"]", re.IGNORECASE)
+    r"^https?://(?:[^/@{}\s'\"`]*@)?([A-Za-z0-9.-]+)(?::\d+)?(?:/|$)")
+_WRITE_CALL_RE = re.compile(
+    r"(?P<generic>\.request\s*\()|(?P<urllib>\bRequest\s*\()|(?P<fetch>\bfetch\s*\()|"
+    r"[\w)\]]*\.(?P<verb>post|put|patch|delete)\s*\(")
+_LITERAL_ARG_RE = re.compile(
+    r"\s*(?:url\s*=\s*)?([rRuUfFbB]{0,2})(['\"`])([^'\"`\n]*)\2\s*(?:,|$)")
+_PY_METHOD_KW_RE = re.compile(r"\bmethod\s*=\s*(['\"])(\w+)\1")
+_JS_METHOD_RE = re.compile(r"\bmethod\s*:\s*(?:(['\"`])(\w+)\1)?")
+_WRITE_METHOD_RE = re.compile(r"['\"`](?:POST|PUT|PATCH|DELETE)['\"`]", re.IGNORECASE)
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_FORMATTED_HEAD_RE = re.compile(r"^\$?\{(\w+)\}(.*)$", re.S)
 _SHELL_TOOL_RE = re.compile(r"(?<![\w./-])(curl|wget|https?)(?=\s)")
 _SHELL_SEGMENT_END_RE = re.compile(r"[\n;|&]")
 # curl / wget not written as a shell call (e.g. subprocess.run(["curl", ...])):
@@ -137,16 +147,29 @@ _HTTPIE_VALUE_FLAGS = frozenset({
     "-o", "--output", "--verify", "--cert", "--cert-key", "--timeout",
 })
 _HTTPIE_REDIRECT_FLAGS = frozenset({"--proxy"})
+_METHOD_FLAGS = frozenset({"-X", "--request", "--method"})
 _HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"})
 
 
-def _url_host(url: str, allow_braces: bool = True) -> Optional[str]:
+class _Site(NamedTuple):
+    """One write call: span, literal URL, URL after base-constant resolution
+    (Notion only), and the upper-case method (None when unknown)."""
+    start: int
+    end: int
+    url: Optional[str]
+    resolved: Optional[str]
+    method: Optional[str]
+
+
+def _url_host(url: Optional[str], allow_braces: bool = True) -> Optional[str]:
     """Host of a literal ``scheme://host[:port](/...)`` URL, else None."""
-    m = _URL_HEAD_RE.match(url)
+    m = _URL_HEAD_RE.match(url or "")
     if not m or (not allow_braces and "{" in m.group(0)):
         return None
     host = m.group(1).lower()
-    return host if _PLAIN_HOST_RE.match(host) else None
+    if _PLAIN_HOST_RE.match(host) or _INTERNAL_HOST_RE.match(host):
+        return host
+    return None
 
 
 def _call_args(text: str, open_idx: int) -> Tuple[str, int]:
@@ -159,7 +182,7 @@ def _call_args(text: str, open_idx: int) -> Tuple[str, int]:
                 i += 1
             elif ch == quote:
                 quote = None
-        elif ch in "'\"":
+        elif ch in "'\"`":
             quote = ch
         elif ch in "([{":
             depth += 1
@@ -171,57 +194,105 @@ def _call_args(text: str, open_idx: int) -> Tuple[str, int]:
     return text[open_idx + 1:], len(text)
 
 
-def _python_write_sites(text: str) -> list:
+def _base_constant(name: str, text: str) -> Optional[str]:
+    """The literal URL ``name`` is bound to, when it is bound exactly once
+    (``BASE = "https://..."`` / ``const BASE = "..."``) and never rebound,
+    shadowed or deleted. Anything else: None."""
+    word = re.escape(name)
+    assign = re.compile(
+        rf"^[ \t]*(?:(?:const|let|var)\s+)?{word}\s*(?::[^=\n]*)?=\s*"
+        rf"(['\"])(https?://[^'\"\n{{}}$]*)\1\s*;?\s*$", re.M)
+    found = assign.findall(text)
+    bindings = re.findall(rf"\b{word}\s*(?::[^=\n]*)?(?:[-+*/%|&^@]|//|:)?=(?!=)", text)
+    shadowed = re.search(
+        rf"(?:\b(?:def|lambda|for|as|import|global|nonlocal|del|class|function)\b|=>)"
+        rf"[^\n]*\b{word}\b|\b{word}\b[^\n]*=>", text)
+    if len(found) != 1 or len(bindings) != 1 or shadowed:
+        return None
+    return found[0][1]
+
+
+def _literal_target(args: str, text: str) -> Tuple[Optional[str], Optional[str]]:
+    """(literal URL, URL resolved through a base constant) of a call's target."""
+    lit = _LITERAL_ARG_RE.match(args)
+    if not lit:
+        return None, None
+    prefix, quote, content = lit.group(1).lower(), lit.group(2), lit.group(3)
+    formatted = "f" in prefix or quote == "`"
+    url = content if _url_host(content, allow_braces=not formatted) else None
+    if url or not formatted:
+        return url, url
+    head = _FORMATTED_HEAD_RE.match(content)
+    base = _base_constant(head.group(1), text) if head else None
+    return None, (base + head.group(2)) if base else None
+
+
+def _code_write_sites(text: str) -> list:
     sites = []
-    for m in _PY_WRITE_CALL_RE.finditer(text):
+    for m in _WRITE_CALL_RE.finditer(text):
         args, end = _call_args(text, m.end() - 1)
         if m.group("generic"):
-            # session.request("POST", url): never attributed to a host
+            # session.request("POST", url) / https.request({...}): never attributed
             if _WRITE_METHOD_RE.search(args):
-                sites.append((m.start(), end, None))
+                sites.append(_Site(m.start(), end, None, None, None))
             continue
-        if m.group("urllib") and "," not in args:
-            continue  # urllib Request(url) alone is a GET
-        lit = _PY_LITERAL_ARG_RE.match(args)
-        host = None
-        if lit:
-            host = _url_host(lit.group(3), allow_braces="f" not in lit.group(1).lower())
-        sites.append((m.start(), end, host))
+        if m.group("urllib"):
+            if "," not in args:
+                continue  # urllib Request(url) alone is a GET
+            kw = _PY_METHOD_KW_RE.search(args)
+            method = kw.group(2).upper() if kw else (None if "method" in args else "POST")
+        elif m.group("fetch"):
+            js = _JS_METHOD_RE.search(args)
+            if not js:
+                continue  # fetch(url) is a GET
+            method = js.group(2).upper() if js.group(2) else None
+            if method in _READ_METHODS:
+                continue
+        else:
+            method = m.group("verb").upper()
+        url, resolved = _literal_target(args, text)
+        sites.append(_Site(m.start(), end, url, resolved, method))
     return sites
 
 
 def _shell_targets(tokens: list, value_flags, redirect_flags, httpie: bool = False):
-    """Literal target hosts of one curl / wget / httpie call, or None."""
-    targets, i, method_seen = [], 1, False
+    """(literal target URLs, method) of one curl / wget / httpie call; the
+    URL list is None when any target is not a literal URL."""
+    targets, i, method = [], 1, None
     while i < len(tokens):
         tok = tokens[i]
-        name = tok.split("=", 1)[0]
+        name, _, attached = tok.partition("=")
         if tok.startswith("-") and len(tok) > 1:
             if name in redirect_flags or tok[:2] in redirect_flags:
-                return None
+                return None, method
             if name == "--url":
-                targets.append(tok.split("=", 1)[1] if "=" in tok else
+                targets.append(attached if attached else
                                (tokens[i + 1] if i + 1 < len(tokens) else ""))
-                i += 1 if "=" in tok else 2
+                i += 1 if attached else 2
                 continue
-            if "=" not in tok and (tok in value_flags):
+            if name in _METHOD_FLAGS and attached:
+                method = attached.upper()
+            elif tok.startswith("-X") and len(tok) > 2:
+                method = tok[2:].upper()
+            if not attached and tok in value_flags:
+                if tok in _METHOD_FLAGS and i + 1 < len(tokens):
+                    method = tokens[i + 1].upper()
                 i += 2
                 continue
             i += 1
             continue
         if httpie:
-            if not method_seen and tok in _HTTP_METHODS:
-                method_seen = True
+            if method is None and tok in _HTTP_METHODS:
+                method = tok
                 i += 1
                 continue
             targets.append(tok)
             break  # the rest are request items
         targets.append(tok)
         i += 1
-    if not targets:
-        return None
-    hosts = [_url_host(t, allow_braces=False) for t in targets]
-    return None if None in hosts else hosts
+    if not targets or any(_url_host(t, allow_braces=False) is None for t in targets):
+        return None, method
+    return targets, method
 
 
 def _shell_write_sites(text: str) -> list:
@@ -235,41 +306,63 @@ def _shell_write_sites(text: str) -> list:
         try:
             tokens = shlex.split(segment)
         except ValueError:
-            sites.append((m.start(), end, None))
+            sites.append(_Site(m.start(), end, None, None, None))
             continue
         tool = m.group(1).lower()
         if tool == "curl":
-            hosts = _shell_targets(tokens, _CURL_VALUE_FLAGS, _CURL_REDIRECT_FLAGS)
+            urls, method = _shell_targets(tokens, _CURL_VALUE_FLAGS, _CURL_REDIRECT_FLAGS)
         elif tool == "wget":
-            hosts = _shell_targets(tokens, _WGET_VALUE_FLAGS, _WGET_REDIRECT_FLAGS)
+            urls, method = _shell_targets(tokens, _WGET_VALUE_FLAGS, _WGET_REDIRECT_FLAGS)
         else:
-            hosts = _shell_targets(tokens, _HTTPIE_VALUE_FLAGS, _HTTPIE_REDIRECT_FLAGS, httpie=True)
-        if hosts is None or len(set(hosts)) != 1:
-            sites.append((m.start(), end, None))
-        else:
-            sites.append((m.start(), end, hosts[0]))
+            urls, method = _shell_targets(
+                tokens, _HTTPIE_VALUE_FLAGS, _HTTPIE_REDIRECT_FLAGS, httpie=True)
+        method = method or "POST"  # a write without -X sends data: POST
+        for url in urls or [None]:
+            sites.append(_Site(m.start(), end, url, url, method))
     return sites
 
 
-def _literal_write_host(text: str) -> Optional[str]:
-    """The one host every write in ``text`` literally targets, else None."""
+def _write_sites(text: str) -> Optional[list]:
+    """Every write call in ``text``, or None when a write can't be read."""
     if _SHELL_TOOL_UNPARSED_RE.search(text):
         return None
-    sites = _python_write_sites(text) + _shell_write_sites(text)
+    sites = _code_write_sites(text) + _shell_write_sites(text)
     for pattern in _HTTP_WRITE_RE:
         for m in pattern.finditer(text):
-            if not any(m.start() < end and m.end() > start for start, end, _ in sites):
+            if not any(m.start() < s.end and m.end() > s.start for s in sites):
                 return None  # a write we can't attribute
-    hosts = {host for _, _, host in sites}
-    if len(hosts) != 1 or None in hosts:
+    return sites or None
+
+
+def _literal_write_hosts(text: str) -> Optional[set]:
+    """Hosts every write in ``text`` literally targets, else None."""
+    sites = _write_sites(text)
+    if not sites:
         return None
-    return hosts.pop()
+    hosts = {_url_host(s.url) for s in sites}
+    return None if None in hosts else hosts
+
+
+def _notion_read_only(text: str) -> bool:
+    """Every write is a POST to a Notion read endpoint (search / db query)."""
+    if _NOTION_WRITE_RE.search(text):
+        return False
+    sites = _write_sites(text)
+    if not sites:
+        return False
+    for s in sites:
+        if s.method != "POST" or _url_host(s.resolved) != "api.notion.com":
+            return False
+        path = urlsplit(s.resolved).path
+        if not _NOTION_READ_PATH_RE.match(path):
+            return False
+    return True
 
 
 # `python3 x.py`, `bash -e run.sh`, `node a.js`, `./send.sh`
 _SCRIPT_RUN_RE = re.compile(
     r"(?:^|[\s;|&(])(?:(?:python[\d.]*|bash|sh|zsh|node|ruby|perl)\s+(?:-\S+\s+)*)?"
-    r"((?:\.{0,2}/)?[\w./~-]+\.(?:py|sh|bash|js|mjs|rb|pl))\b"
+    r"((?:\.{0,2}/)?[\w./~-]+\.(?:py|sh|bash|js|mjs|cjs|jsx|tsx|mts|cts|ts|rb|pl))\b"
 )
 _MAX_SCRIPT_BYTES = 256 * 1024
 
@@ -296,10 +389,12 @@ def detect_outbound_action(text: str) -> OutboundMatch:
     if _any(_HTTP_WRITE_RE, text):
         hosts = [h.lower() for h in _URL_HOST_RE.findall(text)]
         external = [h for h in hosts if not _INTERNAL_HOST_RE.match(h)]
-        if hosts and not external:
-            return _NONE  # only talks to the platform itself
+        literal = _literal_write_hosts(text)
+        if hosts and not external and literal and all(
+                _INTERNAL_HOST_RE.match(h) for h in literal):
+            return _NONE  # every write literally goes to the platform itself
         if (external and all(h == "api.notion.com" for h in external)
-                and _NOTION_READ_RE.search(text) and not _NOTION_WRITE_RE.search(text)):
+                and _notion_read_only(text)):
             return _NONE
         target = external[0] if external else None
         description = (
@@ -310,8 +405,8 @@ def detect_outbound_action(text: str) -> OutboundMatch:
             return True, "outbound:publish", f"send data to {publish}"
         # Every write literally targets the one external host the text names:
         # keyed by host so it can be always-allowed.
-        host = _literal_write_host(text)
-        if host and set(external) == {host}:
+        if literal and len(literal) == 1 and set(external) == literal:
+            host = next(iter(literal))
             return True, f"outbound:http:{host}", description
         return True, "outbound:http", description
     return _NONE
