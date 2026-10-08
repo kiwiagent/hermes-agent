@@ -2547,6 +2547,21 @@ def _is_outbound_key(key: str) -> bool:
     return key.startswith("outbound:")
 
 
+def _outbound_can_be_permanent(key: Optional[str]) -> bool:
+    """kiwiagent: only an http write to one external host (outbound:http:<host>)
+    may be always-allowed. Email, messages and publishing as the user never."""
+    from tools.outbound_guard import allowable_http_host
+    return allowable_http_host(key) is not None
+
+
+def _outbound_host_allowed(key: Optional[str]) -> bool:
+    """True when the user always-allowed this outbound:http:<host> key."""
+    if not _outbound_can_be_permanent(key):
+        return False
+    with _lock:
+        return key in _permanent_approved
+
+
 def _get_cron_approval_mode() -> str:
     """Read the cron approval mode from config. Returns 'deny' or 'approve'."""
     try:
@@ -3275,6 +3290,9 @@ def check_all_command_guards(command: str, env_type: str,
 
     # kiwiagent: sending something out in the user's name always asks.
     outbound, outbound_key, outbound_desc = _detect_outbound(command=command)
+    # ...unless it writes to a host the user always-allowed (also from cron).
+    if outbound and _outbound_host_allowed(outbound_key):
+        outbound = False
 
     if not outbound and _command_matches_permanent_allowlist(command):
         return {"approved": True, "message": None}
@@ -3475,6 +3493,8 @@ def check_all_command_guards(command: str, env_type: str,
     primary_key = warnings[0][0]
     all_keys = [key for key, _, _ in warnings]
     has_tirith = any(is_t for _, _, is_t in warnings)
+    allow_permanent = (not has_tirith and not smart_denied_for_owner
+                       and (not outbound or _outbound_can_be_permanent(outbound_key)))
 
     # Gateway/async approval — block the agent thread until the user
     # responds with /approve or /deny, mirroring the CLI's synchronous
@@ -3505,7 +3525,7 @@ def check_all_command_guards(command: str, env_type: str,
                 "description": redact_sensitive_text(combined_desc),
                 # Smart DENY overrides are one-operation decisions, so the UI
                 # must not offer a permanent scope.
-                "allow_permanent": not has_tirith and not smart_denied_for_owner and not outbound,
+                "allow_permanent": allow_permanent,
             }
             if smart_denied_for_owner:
                 approval_data["smart_denied"] = True
@@ -3567,6 +3587,10 @@ def check_all_command_guards(command: str, env_type: str,
             if not smart_denied_for_owner:
                 for key, _, is_tirith in warnings:
                     if _is_outbound_key(key):
+                        if (choice == "always" and allow_permanent
+                                and _outbound_can_be_permanent(key)):
+                            approve_permanent(key)
+                            save_permanent_allowlist(_permanent_approved)
                         continue
                     if choice == "session" or (choice == "always" and is_tirith):
                         approve_session(session_key, key)
@@ -3623,7 +3647,7 @@ def check_all_command_guards(command: str, env_type: str,
     choice = prompt_dangerous_approval(
         command,
         combined_desc,
-        allow_permanent=not has_tirith and not smart_denied_for_owner,
+        allow_permanent=allow_permanent,
         smart_denied=smart_denied_for_owner,
         approval_callback=approval_callback,
     )
@@ -3660,6 +3684,10 @@ def check_all_command_guards(command: str, env_type: str,
     if not smart_denied_for_owner:
         for key, _, is_tirith in warnings:
             if _is_outbound_key(key):
+                if (choice == "always" and allow_permanent
+                        and _outbound_can_be_permanent(key)):
+                    approve_permanent(key)
+                    save_permanent_allowlist(_permanent_approved)
                 continue
             if choice == "session" or (choice == "always" and is_tirith):
                 # tirith: session only (no permanent broad allowlisting)
@@ -3720,6 +3748,8 @@ def check_execute_code_guard(code: str, env_type: str,
     # kiwiagent: a script that sends something out in the user's name always
     # asks — never smart-approved, never covered by an earlier approval.
     outbound, outbound_key, outbound_desc = _detect_outbound(code=code)
+    if outbound and _outbound_host_allowed(outbound_key):
+        outbound = False
     if outbound:
         description = outbound_desc
 
@@ -3850,7 +3880,8 @@ def check_execute_code_guard(code: str, env_type: str,
         "pattern_key": pattern_key,
         "pattern_keys": [pattern_key],
         "description": display_description,
-        "allow_permanent": not smart_denied_for_owner and not outbound,
+        "allow_permanent": (not smart_denied_for_owner
+                            and (not outbound or _outbound_can_be_permanent(outbound_key))),
     }
     if smart_denied_for_owner:
         approval_data["smart_denied"] = True
@@ -3903,6 +3934,9 @@ def check_execute_code_guard(code: str, env_type: str,
             approve_session(session_key, pattern_key)
             approve_permanent(pattern_key)
             save_permanent_allowlist(_permanent_approved)
+    elif outbound and choice == "always" and _outbound_can_be_permanent(outbound_key):
+        approve_permanent(outbound_key)
+        save_permanent_allowlist(_permanent_approved)
     # choice == "once": no persistence — approval lasts this single call only.
 
     return {"approved": True, "message": None,
