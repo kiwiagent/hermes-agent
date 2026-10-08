@@ -59,7 +59,23 @@ _EMAIL_RE = [re.compile(p, _FLAGS) for p in _EMAIL_PATTERNS]
 _MESSAGE_RE = [re.compile(p, _FLAGS) for p in _MESSAGE_PATTERNS]
 _HTTP_WRITE_RE = [re.compile(p, _FLAGS) for p in _HTTP_WRITE_PATTERNS]
 
-_URL_HOST_RE = re.compile(r"https?://([^/\s'\"`:)]+)", re.IGNORECASE)
+_URL_HOST_RE = re.compile(r"https?://(?:[^/\s'\"`@]*@)?([^/\s'\"`:)]+)", re.IGNORECASE)
+# A host that may be always-allowed: a plain DNS name, not a template.
+_PLAIN_HOST_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
+
+# Writing to these APIs publishes or sends something in the user's name
+# (social posts, mail, chat messages): treated like messages — always asked,
+# never always-allowed. A host matches itself and its subdomains.
+PUBLISH_AS_USER_HOSTS = frozenset({
+    # social posting
+    "api.twitter.com", "api.x.com", "graph.facebook.com", "graph.instagram.com",
+    "api.linkedin.com", "weibo.com", "threads.net",
+    # mail / message sending
+    "gmail.googleapis.com", "graph.microsoft.com", "api.sendgrid.com",
+    "api.mailgun.net", "api.postmarkapp.com", "slack.com", "discord.com",
+    "discordapp.com", "api.telegram.org", "graph.whatsapp.com", "whatsapp.net",
+    "api.twilio.com",
+})
 _INTERNAL_HOST_RE = re.compile(
     r"^(?:localhost|0\.0\.0\.0|127(?:\.\d+){3}|\[?::1\]?|"
     r"[\w.-]+\.svc(?:\.cluster\.local)?|[\w.-]+\.cluster\.local)$",
@@ -112,10 +128,35 @@ def detect_outbound_action(text: str) -> OutboundMatch:
                 and _NOTION_READ_RE.search(text) and not _NOTION_WRITE_RE.search(text)):
             return _NONE
         target = external[0] if external else None
-        return True, "outbound:http", (
+        description = (
             f"send data to {target}" if target else "send data to an online service"
         )
+        publish = next((h for h in external if is_publish_host(h)), None)
+        if publish:
+            return True, "outbound:publish", f"send data to {publish}"
+        # Exactly one plain external host: keyed by host so it can be always-allowed.
+        distinct = set(external)
+        if len(distinct) == 1 and _PLAIN_HOST_RE.match(target):
+            return True, f"outbound:http:{target}", description
+        return True, "outbound:http", description
     return _NONE
+
+
+def is_publish_host(host: str) -> bool:
+    host = (host or "").lower().rstrip(".")
+    return any(host == h or host.endswith("." + h) for h in PUBLISH_AS_USER_HOSTS)
+
+
+def allowable_http_host(key: Optional[str]) -> Optional[str]:
+    """The host of an ``outbound:http:<host>`` key the user may always-allow,
+    else None (email / message / publish keys never are)."""
+    prefix = "outbound:http:"
+    if not isinstance(key, str) or not key.startswith(prefix):
+        return None
+    host = key[len(prefix):]
+    if not _PLAIN_HOST_RE.match(host) or is_publish_host(host):
+        return None
+    return host
 
 
 def _script_paths(command: str) -> list[str]:
@@ -169,7 +210,10 @@ def detect_outbound_script_file(path: str) -> OutboundMatch:
 
 
 __all__ = [
+    "PUBLISH_AS_USER_HOSTS",
+    "allowable_http_host",
     "detect_outbound_action",
     "detect_outbound_command",
     "detect_outbound_script_file",
+    "is_publish_host",
 ]

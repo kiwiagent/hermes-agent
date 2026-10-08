@@ -8,7 +8,11 @@ cron job where no one is there to approve it.
 """
 import pytest
 
-from tools.outbound_guard import detect_outbound_action, detect_outbound_command
+from tools.outbound_guard import (
+    allowable_http_host,
+    detect_outbound_action,
+    detect_outbound_command,
+)
 
 
 class TestEmail:
@@ -58,7 +62,7 @@ class TestHttpWrites:
     ])
     def test_detected_with_host(self, text, host):
         found, key, desc = detect_outbound_action(text)
-        assert found and key == "outbound:http"
+        assert found and key == f"outbound:http:{host}"
         assert desc == f"send data to {host}"
 
     def test_unknown_target_still_detected(self):
@@ -154,4 +158,88 @@ class TestCommandWithScriptFile:
     def test_plain_command_is_scanned(self, tmp_path):
         found, key, _ = detect_outbound_command(
             "curl -X POST https://api.example.com/x -d a=1", cwd=str(tmp_path))
+        assert found and key == "outbound:http:api.example.com"
+
+
+class TestPerHostKey:
+    """A write to exactly one external host is keyed by that host, so the user
+    can always-allow it (outbound:http:<host>). Anything else stays generic."""
+
+    def test_host_is_lowercased_and_port_dropped(self):
+        found, key, _ = detect_outbound_action("curl -X POST https://API.Notion.com:443/v1/pages -d '{}'")
+        assert found and key == "outbound:http:api.notion.com"
+
+    def test_userinfo_is_not_the_host(self):
+        found, key, _ = detect_outbound_action("curl -X POST https://bot:s3cret@api.example.com/x -d a=1")
+        assert found and key == "outbound:http:api.example.com"
+
+    def test_same_host_twice_is_one_host(self):
+        text = ("requests.post('https://api.example.com/a', json=1)\n"
+                "requests.post('https://api.example.com/b', json=2)")
+        assert detect_outbound_action(text)[1] == "outbound:http:api.example.com"
+
+    def test_several_external_hosts_get_generic_key(self):
+        text = "curl https://a.example.com/x | curl -X POST https://b.example.org/y -d @-"
+        found, key, _ = detect_outbound_action(text)
         assert found and key == "outbound:http"
+
+    def test_unknown_target_gets_generic_key(self):
+        found, key, _ = detect_outbound_action("import requests\nrequests.post(url, json=payload)")
+        assert found and key == "outbound:http"
+
+    def test_templated_host_gets_generic_key(self):
+        found, key, _ = detect_outbound_action('requests.post(f"https://{host}/v1/x", json=b)')
+        assert found and key == "outbound:http"
+
+
+class TestPublishAsUserHosts:
+    """Writes to social-posting and mail/message-sending APIs publish in the
+    user's name: they are never a plain http write (never always-allowed)."""
+
+    @pytest.mark.parametrize("host", [
+        "api.twitter.com", "api.x.com", "graph.facebook.com", "graph.instagram.com",
+        "api.linkedin.com", "api.weibo.com", "open.weibo.com", "graph.threads.net",
+        "api.threads.net", "gmail.googleapis.com", "graph.microsoft.com",
+        "api.sendgrid.com", "api.mailgun.net", "api.postmarkapp.com", "slack.com",
+        "api.slack.com", "discord.com", "api.telegram.org", "graph.whatsapp.com",
+        "mmg.whatsapp.net",
+    ])
+    def test_write_is_publish(self, host):
+        found, key, desc = detect_outbound_action(f"curl -X POST https://{host}/v1/x -d a=1")
+        assert found and key == "outbound:publish"
+        assert desc == f"send data to {host}"
+
+    def test_twilio_is_a_message(self):
+        found, key, _ = detect_outbound_action("curl -X POST https://api.twilio.com/v1/x -d a=1")
+        assert found and key == "outbound:message"
+
+    def test_publish_host_among_others_is_publish(self):
+        text = ("requests.post('https://api.notion.com/v1/pages', json=p)\n"
+                "requests.post('https://api.x.com/2/tweets', json=t)")
+        assert detect_outbound_action(text)[1] == "outbound:publish"
+
+    def test_lookalike_host_is_not_publish(self):
+        found, key, _ = detect_outbound_action("curl -X POST https://notslack.com/x -d a=1")
+        assert found and key == "outbound:http:notslack.com"
+
+    def test_reading_from_publish_host_is_not_outbound(self):
+        assert detect_outbound_action("curl https://api.x.com/2/tweets/1")[0] is False
+
+
+class TestAllowableHttpHost:
+    @pytest.mark.parametrize("key,host", [
+        ("outbound:http:api.notion.com", "api.notion.com"),
+        ("outbound:http:hooks.zapier.com", "hooks.zapier.com"),
+    ])
+    def test_allowable(self, key, host):
+        assert allowable_http_host(key) == host
+
+    @pytest.mark.parametrize("key", [
+        "outbound:email", "outbound:message", "outbound:publish",
+        "outbound:email:x", "outbound:http", "outbound:http:",
+        "outbound:http:api.x.com", "outbound:http:graph.whatsapp.com",
+        "outbound:http:API.NOTION.COM", "outbound:http:{host}",
+        "recursive delete", "", None,
+    ])
+    def test_not_allowable(self, key):
+        assert allowable_http_host(key) is None
