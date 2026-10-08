@@ -433,3 +433,39 @@ class TestJavaScriptWrites:
         found, key, _ = detect_outbound_command(command, cwd=str(tmp_path))
 
         assert found and key == "outbound:http"
+
+
+class TestHostKeyThroughBaseConstant:
+    """The Notion skill writes with f"{API_URL}/pages": a base constant bound
+    once to a literal URL counts as a literal target for the host key too."""
+
+    @pytest.mark.parametrize("text", [
+        'API_URL = "https://api.notion.com/v1"\nrequests.post(f"{API_URL}/pages", json=page)',
+        'BASE: str = "https://api.notion.com/v1"\nrequests.patch(f"{BASE}/pages/{pid}", json=p)\n'
+        'requests.post(f"{BASE}/pages", json=q)',
+        'const BASE = "https://api.notion.com/v1";\n'
+        "await fetch(`${BASE}/pages`, {method: 'POST', body})",
+    ])
+    def test_base_constant_gets_host_key(self, text):
+        found, key, _ = detect_outbound_action(text)
+        assert found and key == "outbound:http:api.notion.com"
+
+    @pytest.mark.parametrize("text", [
+        # reassigned
+        'BASE = "https://api.notion.com/v1"\nBASE = os.environ["X"]\n'
+        'requests.post(f"{BASE}/pages", json=p)',
+        'BASE = "https://api.notion.com/v1"\nBASE += suffix\nrequests.post(f"{BASE}/pages", json=p)',
+        # shadowed by a parameter
+        'BASE = "https://api.notion.com/v1"\ndef create(BASE, page):\n'
+        '    requests.post(f"{BASE}/pages", json=page)',
+        # deleted
+        'BASE = "https://api.notion.com/v1"\ndel BASE\nrequests.post(f"{BASE}/pages", json=p)',
+        # built from another expression
+        'BASE = HOST + "/v1"\nrequests.post(f"{BASE}/pages", json=p)\n# https://api.notion.com',
+        # base on another host, notion only in a comment
+        'BASE = "https://hooks.example.org/v1"\n# like https://api.notion.com/v1/pages\n'
+        'requests.post(f"{BASE}/pages", json=p)',
+    ])
+    def test_unsure_base_gets_generic_key(self, text):
+        found, key, _ = detect_outbound_action(text)
+        assert found and key == "outbound:http"

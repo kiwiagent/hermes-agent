@@ -519,3 +519,49 @@ class TestExemptionsNeedLiteralTargets:
 
         assert res["approved"] is False
         assert "draft" in res["message"].lower()
+
+
+# ------------------------------------ host key through a base URL constant
+
+NOTION_BASE_CODE = ('import requests\nAPI_URL = "https://api.notion.com/v1"\n'
+                    'requests.post(f"{API_URL}/pages", json=page)\n')
+NOTION_BASE_SHADOWED = ('import requests\nAPI_URL = "https://api.notion.com/v1"\n'
+                        'def create(API_URL, page):\n'
+                        '    requests.post(f"{API_URL}/pages", json=page)\n')
+
+
+class TestHostKeyThroughBaseConstant:
+    def test_offers_always_and_saves_host(self, gw_session, allowlist, tmp_path, monkeypatch):
+        perm, _ = allowlist
+        seen = _answer(gw_session, "always")
+
+        A.check_all_command_guards(_as_command(tmp_path, monkeypatch, NOTION_BASE_CODE), "local")
+
+        assert seen["prompts"][0]["allow_permanent"] is True
+        assert perm == {NOTION_ALLOWED}
+
+    def test_auto_allowed_once_allowed(self, gw_session, allowlist, tmp_path, monkeypatch):
+        allowlist[0].add(NOTION_ALLOWED)
+        seen = _answer(gw_session, "deny")
+
+        res = A.check_all_command_guards(_as_command(tmp_path, monkeypatch, NOTION_BASE_CODE), "local")
+
+        assert res["approved"] is True and "prompts" not in seen
+
+    def test_cron_runs_once_allowed(self, gw_session, allowlist, tmp_path, monkeypatch):
+        allowlist[0].add(NOTION_ALLOWED)
+        command = _as_command(tmp_path, monkeypatch, NOTION_BASE_CODE)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+        monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "deny")
+
+        assert A.check_all_command_guards(command, "local")["approved"] is True
+
+    def test_shadowed_base_asks_without_always(self, gw_session, allowlist, tmp_path, monkeypatch):
+        allowlist[0].add(NOTION_ALLOWED)
+        seen = _answer(gw_session, "deny")
+
+        res = A.check_all_command_guards(_as_command(tmp_path, monkeypatch, NOTION_BASE_SHADOWED), "local")
+
+        assert res["approved"] is False
+        assert seen["prompts"][0]["allow_permanent"] is False
