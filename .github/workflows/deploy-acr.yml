@@ -4,18 +4,18 @@ name: Build and Push to ACR
 on:
   push:
     branches: [main]
-    paths:
-      - "Dockerfile"
-      - ".github/workflows/deploy-acr.yml"
-      - "cli.py"
-      - "cli-config.yaml.example"
-      - "agent/**"
-      - "apps/**"
-      - "acp_adapter/**"
-      - "acp_registry/**"
-      - "hermes/**"
-      - "docker/**"
-      - "batch_runner.py"
+    # The image copies the whole repo (Dockerfile `COPY . .`), so any code
+    # change needs a build; only skip what never reaches the image. (The old
+    # allow-list missed tools/ and gateway/, so those merges never deployed.)
+    paths-ignore:
+      - "docs/**"
+      - "website/**"
+      - "tests/**"
+      - "tests-js/**"
+      - ".plans/**"
+      - "contributors/**"
+      - "infographic/**"
+      # Not "**/*.md": skills are SKILL.md files and do change the agent.
   workflow_dispatch:
 
 env:
