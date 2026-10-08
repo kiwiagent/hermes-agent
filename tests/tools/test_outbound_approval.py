@@ -436,3 +436,53 @@ class TestAllowedHostNeedsLiteralTargets:
         assert res["approved"] is auto
         if not auto:
             assert "draft" in res["message"].lower()
+
+
+# ------------------------------------------------ permanent approvals list
+
+class TestListPermanentApprovals:
+    def test_lists_http_hosts_then_commands_never_hard_keys(self, allowlist):
+        allowlist[0].update({
+            "recursive delete", "outbound:http:api.notion.com", "podman *",
+            "outbound:http:hooks.zapier.com",
+            # hand-written, hard-blocked or meaningless: never listed
+            "outbound:email", "outbound:message", "outbound:publish",
+            "outbound:http", "outbound:http:api.x.com", "outbound:email:x",
+        })
+
+        assert A.list_permanent_approvals() == [
+            {"key": "outbound:http:api.notion.com", "kind": "http", "target": "api.notion.com"},
+            {"key": "outbound:http:hooks.zapier.com", "kind": "http", "target": "hooks.zapier.com"},
+            {"key": "podman *", "kind": "command", "target": "podman *"},
+            {"key": "recursive delete", "kind": "command", "target": "recursive delete"},
+        ]
+
+    def test_empty(self, allowlist):
+        assert A.list_permanent_approvals() == []
+
+
+class TestRevokePermanent:
+    def test_removes_from_memory_and_config(self, allowlist):
+        perm, saved = allowlist
+        perm.update({"outbound:http:api.notion.com", "recursive delete"})
+
+        assert A.revoke_permanent("outbound:http:api.notion.com") is True
+
+        assert perm == {"recursive delete"}
+        assert saved == [{"recursive delete"}]
+
+    def test_unknown_key_changes_nothing(self, allowlist):
+        perm, saved = allowlist
+        perm.add("recursive delete")
+
+        assert A.revoke_permanent("outbound:http:api.notion.com") is False
+
+        assert perm == {"recursive delete"} and saved == []
+
+    def test_revoked_host_asks_again(self, gw_session, allowlist):
+        allowlist[0].add("outbound:http:api.notion.com")
+        A.revoke_permanent("outbound:http:api.notion.com")
+        seen = _answer(gw_session, "deny")
+
+        assert A.check_all_command_guards(NOTION_CMD, "local")["approved"] is False
+        assert len(seen["prompts"]) == 1
