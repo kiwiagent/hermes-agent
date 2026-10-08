@@ -1569,6 +1569,8 @@ class APIServerAdapter(BasePlatformAdapter):
             ("POST", "/api/jobs/{job_id}/pause", self._handle_pause_job),
             ("POST", "/api/jobs/{job_id}/resume", self._handle_resume_job),
             ("POST", "/api/jobs/{job_id}/run", self._handle_run_job),
+            ("GET", "/api/approvals/permanent", self._handle_list_permanent_approvals),
+            ("DELETE", "/api/approvals/permanent", self._handle_revoke_permanent_approval),
             ("POST", "/v1/runs", self._handle_runs),
             ("GET", "/v1/runs/{run_id}", self._handle_get_run),
             ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
@@ -4084,6 +4086,29 @@ class APIServerAdapter(BasePlatformAdapter):
             "object": "response",
             "deleted": True,
         })
+
+    # ------------------------------------------------------------------
+    # kiwiagent: permanent ("always allow") approvals API
+    # ------------------------------------------------------------------
+
+    async def _handle_list_permanent_approvals(self, request: "web.Request") -> "web.Response":
+        """GET /api/approvals/permanent — the user's always-allowed actions."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        from tools.approval import list_permanent_approvals
+        return web.json_response({"items": list_permanent_approvals()})
+
+    async def _handle_revoke_permanent_approval(self, request: "web.Request") -> "web.Response":
+        """DELETE /api/approvals/permanent?key=<key> — revoke one always-allow."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        key = request.query.get("key", "")
+        if not key:
+            return web.json_response({"error": "key is required"}, status=400)
+        from tools.approval import revoke_permanent
+        return web.json_response({"removed": revoke_permanent(key)})
 
     # ------------------------------------------------------------------
     # Cron jobs API

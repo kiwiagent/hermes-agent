@@ -2266,6 +2266,37 @@ def save_permanent_allowlist(patterns: set):
         logger.warning("Could not save allowlist: %s", e)
 
 
+def list_permanent_approvals() -> list:
+    """kiwiagent: the always-allowed actions, for the SmartBuddy app.
+
+    ``outbound:http:<host>`` keys are ``kind: http`` (target = host); other
+    non-outbound keys are ``kind: command``. Email / message / publish keys
+    can never be always-allowed, so a hand-written one is never listed.
+    """
+    from tools.outbound_guard import allowable_http_host
+    with _lock:
+        keys = sorted(k for k in _permanent_approved if isinstance(k, str))
+    http, commands = [], []
+    for key in keys:
+        host = allowable_http_host(key)
+        if host:
+            http.append({"key": key, "kind": "http", "target": host})
+        elif not _is_outbound_key(key):
+            commands.append({"key": key, "kind": "command", "target": key})
+    return http + commands
+
+
+def revoke_permanent(pattern_key: str) -> bool:
+    """Remove a key from the permanent allowlist and config. False if absent."""
+    with _lock:
+        if pattern_key not in _permanent_approved:
+            return False
+        _permanent_approved.discard(pattern_key)
+        patterns = set(_permanent_approved)
+    save_permanent_allowlist(patterns)
+    return True
+
+
 # =========================================================================
 # Approval prompting + orchestration
 # =========================================================================
