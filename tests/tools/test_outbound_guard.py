@@ -328,3 +328,108 @@ class TestCommandAndScriptsCombined:
             "curl -X POST https://api.notion.com/v1/pages -d @p && python3 sync.py", cwd=str(tmp_path))
 
         assert key == "outbound:http:api.notion.com"
+
+
+class TestInternalExemptionNeedsLiteralTargets:
+    """Only talking to the platform itself is fine — but only when every write
+    literally targets an internal host. An internal URL in a comment or string
+    never vouches for a write to a variable."""
+
+    @pytest.mark.parametrize("text", [
+        "# local test: http://localhost:8642/v1\nrequests.post(url, json=b)",
+        'BASE = "http://127.0.0.1:9000"\nrequests.post(os.environ["HOOK"], json=b)',
+        'curl -X POST "$URL" -d x  # http://localhost:8642/v1',
+        "requests.post('http://localhost:8642/v1/x', json=b)\nrequests.post(hook, json=b)",
+        "fetch(target, {method: 'POST', body})\n// http://localhost:3000",
+    ])
+    def test_variable_write_is_outbound(self, text):
+        found, key, _ = detect_outbound_action(text)
+        assert found and key == "outbound:http"
+
+    @pytest.mark.parametrize("text", [
+        "fetch('http://localhost:3000/api/x', {method: 'POST', body})",
+        "requests.post('http://localhost:8642/v1/a', json=b)\nrequests.put('http://127.0.0.1:9000/b', json=c)",
+    ])
+    def test_literal_internal_writes_are_not_outbound(self, text):
+        assert detect_outbound_action(text)[0] is False
+
+
+class TestNotionReadOnlyNeedsLiteralTargets:
+    """The Notion read-only exemption covers a script only when every
+    write-looking call targets a Notion read endpoint (search / database
+    query) — literally, or through a base URL constant assigned once."""
+
+    @pytest.mark.parametrize("text", [
+        # read endpoint only in a comment, POST to a variable
+        "# https://api.notion.com/v1/search\nrequests.post(url, json={})",
+        # literal Notion search plus a POST to a variable
+        "requests.post('https://api.notion.com/v1/search', json={})\nrequests.post(hook, json=data)",
+        # built search URL plus a POST to a variable
+        'BASE = "https://api.notion.com/v1"\nrequests.post(f"{BASE}/search", json={})\n'
+        "requests.post(other, json=x)",
+        # base constant reassigned
+        'BASE = "https://api.notion.com/v1"\nBASE = os.environ["X"]\n'
+        'requests.post(f"{BASE}/search", json={})',
+        # base shadowed by a parameter
+        'BASE = "https://api.notion.com/v1"\ndef q(BASE):\n'
+        '    requests.post(f"{BASE}/search", json={})',
+        # read endpoint, write method
+        "curl -X PATCH https://api.notion.com/v1/search -d '{}'",
+        "requests.put('https://api.notion.com/v1/search', json={})",
+        # Notion search via fetch plus fetch POST to a variable
+        "fetch('https://api.notion.com/v1/search', {method: 'POST'})\n"
+        "fetch(hook, {method: 'POST', body})",
+    ])
+    def test_not_exempt(self, text):
+        found, key, _ = detect_outbound_action(text)
+        assert found and key.startswith("outbound:http")
+
+    @pytest.mark.parametrize("text", [
+        "fetch('https://api.notion.com/v1/search', {method: 'POST', body: q})",
+        "curl -sS -X POST https://api.notion.com/v1/databases/abc/query -H \"Authorization: Bearer $T\" -d '{}'",
+    ])
+    def test_read_only_calls_still_exempt(self, text):
+        assert detect_outbound_action(text)[0] is False
+
+
+class TestJavaScriptWrites:
+    @pytest.mark.parametrize("text,key", [
+        ("await fetch('https://api.example.com/x', {method: 'POST', body: b})",
+         "outbound:http:api.example.com"),
+        ("fetch(`https://api.example.com/items/${id}`, { method: \"PATCH\", body })",
+         "outbound:http:api.example.com"),
+        ("const r = await fetch(url, { method: 'PUT', body })", "outbound:http"),
+        ("fetch(`https://${host}/x`, {method: 'DELETE'})", "outbound:http"),
+        ("await axios.post('https://api.example.com/x', data)", "outbound:http:api.example.com"),
+        ("await axios.delete(url)", "outbound:http"),
+        ("axios({method: 'post', url: 'https://api.example.com/x', data})", "outbound:http"),
+        ("const req = https.request({hostname: 'api.example.com', method: 'POST'}, cb)",
+         "outbound:http"),
+    ])
+    def test_detected(self, text, key):
+        found, got, _ = detect_outbound_action(text)
+        assert found and got == key
+
+    @pytest.mark.parametrize("text", [
+        "const r = await fetch('https://api.example.com/x')",
+        "fetch('https://api.example.com/x', {method: 'GET'})",
+        "await axios.get('https://api.example.com/x')",
+    ])
+    def test_reads_are_not_outbound(self, text):
+        assert detect_outbound_action(text)[0] is False
+
+    @pytest.mark.parametrize("command,name", [
+        ("node send.mjs", "send.mjs"),
+        ("npx tsx send.ts", "send.ts"),
+        ("bun run send.ts", "send.ts"),
+        ("deno run -A send.ts", "send.ts"),
+        ("node scripts/post.cjs --dry-run=false", "scripts/post.cjs"),
+    ])
+    def test_js_script_files_are_scanned(self, tmp_path, command, name):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("await fetch(process.env.HOOK, {method: 'POST', body})\n")
+
+        found, key, _ = detect_outbound_command(command, cwd=str(tmp_path))
+
+        assert found and key == "outbound:http"
