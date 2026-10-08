@@ -152,12 +152,11 @@ _HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DE
 
 
 class _Site(NamedTuple):
-    """One write call: span, literal URL, URL after base-constant resolution
-    (Notion only), and the upper-case method (None when unknown)."""
+    """One write call: span, target URL (literal or through a base URL
+    constant bound once; None when unknown) and upper-case method."""
     start: int
     end: int
     url: Optional[str]
-    resolved: Optional[str]
     method: Optional[str]
 
 
@@ -212,19 +211,19 @@ def _base_constant(name: str, text: str) -> Optional[str]:
     return found[0][1]
 
 
-def _literal_target(args: str, text: str) -> Tuple[Optional[str], Optional[str]]:
-    """(literal URL, URL resolved through a base constant) of a call's target."""
+def _literal_target(args: str, text: str) -> Optional[str]:
+    """A call's literal target URL, also through a base constant bound once."""
     lit = _LITERAL_ARG_RE.match(args)
     if not lit:
-        return None, None
+        return None
     prefix, quote, content = lit.group(1).lower(), lit.group(2), lit.group(3)
     formatted = "f" in prefix or quote == "`"
     url = content if _url_host(content, allow_braces=not formatted) else None
     if url or not formatted:
-        return url, url
+        return url
     head = _FORMATTED_HEAD_RE.match(content)
     base = _base_constant(head.group(1), text) if head else None
-    return None, (base + head.group(2)) if base else None
+    return (base + head.group(2)) if base else None
 
 
 def _code_write_sites(text: str) -> list:
@@ -234,7 +233,7 @@ def _code_write_sites(text: str) -> list:
         if m.group("generic"):
             # session.request("POST", url) / https.request({...}): never attributed
             if _WRITE_METHOD_RE.search(args):
-                sites.append(_Site(m.start(), end, None, None, None))
+                sites.append(_Site(m.start(), end, None, None))
             continue
         if m.group("urllib"):
             if "," not in args:
@@ -250,8 +249,7 @@ def _code_write_sites(text: str) -> list:
                 continue
         else:
             method = m.group("verb").upper()
-        url, resolved = _literal_target(args, text)
-        sites.append(_Site(m.start(), end, url, resolved, method))
+        sites.append(_Site(m.start(), end, _literal_target(args, text), method))
     return sites
 
 
@@ -306,7 +304,7 @@ def _shell_write_sites(text: str) -> list:
         try:
             tokens = shlex.split(segment)
         except ValueError:
-            sites.append(_Site(m.start(), end, None, None, None))
+            sites.append(_Site(m.start(), end, None, None))
             continue
         tool = m.group(1).lower()
         if tool == "curl":
@@ -318,7 +316,7 @@ def _shell_write_sites(text: str) -> list:
                 tokens, _HTTPIE_VALUE_FLAGS, _HTTPIE_REDIRECT_FLAGS, httpie=True)
         method = method or "POST"  # a write without -X sends data: POST
         for url in urls or [None]:
-            sites.append(_Site(m.start(), end, url, url, method))
+            sites.append(_Site(m.start(), end, url, method))
     return sites
 
 
@@ -335,7 +333,8 @@ def _write_sites(text: str) -> Optional[list]:
 
 
 def _literal_write_hosts(text: str) -> Optional[set]:
-    """Hosts every write in ``text`` literally targets, else None."""
+    """Hosts every write in ``text`` literally targets (directly or through a
+    base URL constant bound once), else None."""
     sites = _write_sites(text)
     if not sites:
         return None
@@ -351,9 +350,9 @@ def _notion_read_only(text: str) -> bool:
     if not sites:
         return False
     for s in sites:
-        if s.method != "POST" or _url_host(s.resolved) != "api.notion.com":
+        if s.method != "POST" or _url_host(s.url) != "api.notion.com":
             return False
-        path = urlsplit(s.resolved).path
+        path = urlsplit(s.url).path
         if not _NOTION_READ_PATH_RE.match(path):
             return False
     return True
