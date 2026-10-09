@@ -121,10 +121,18 @@ class TestNoDoubleConfirm:
 
 
 class TestLongRunningNotice:
-    def test_smartbuddy_pod_FirstNoticeAtFiveMinutes(self, home):
+    def test_smartbuddy_pod_FirstNoticeAtThreeMinutes(self, home):
         _run(home)
 
-        assert _config(home)["agent"]["gateway_notify_interval"] == 300
+        assert _config(home)["agent"]["gateway_notify_interval"] == 180
+
+    def test_smartbuddy_pod_OldFiveMinuteSetting_LoweredToThree(self, home):
+        (home / "config.yaml").write_text(
+            yaml.safe_dump({"model": {}, "agent": {"gateway_notify_interval": 300}}))
+
+        _run(home)
+
+        assert _config(home)["agent"]["gateway_notify_interval"] == 180
 
     def test_smartbuddy_pod_KeepsOtherAgentKeys(self, home):
         (home / "config.yaml").write_text(yaml.safe_dump({"model": {}, "agent": {"max_turns": 90}}))
