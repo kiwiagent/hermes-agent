@@ -26,6 +26,8 @@ Use this skill any time a .pptx file is involved in any way — as input, output
 ```bash
 # Text extraction
 python -m markitdown presentation.pptx
+# If markitdown is not installed (e.g. the Docker image), python-pptx is preinstalled:
+python -c "import sys,pptx; [print(i, sh.text_frame.text) for i,s in enumerate(pptx.Presentation(sys.argv[1]).slides,1) for sh in s.shapes if sh.has_text_frame]" presentation.pptx
 
 # Visual overview
 python scripts/thumbnail.py presentation.pptx

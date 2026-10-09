@@ -17,6 +17,24 @@ For DOCX: use `python-docx` (parses actual document structure, far better than O
 For PPTX: see the `powerpoint` skill (uses `python-pptx` with full slide/notes support).
 This skill covers **PDFs and scanned documents**.
 
+**Preinstalled in the Docker image:** `pypdf`, `python-docx`, `openpyxl`, `python-pptx`
+(no install needed). pymupdf is NOT preinstalled there — for text-based PDFs use pypdf
+first, and only install pymupdf/marker when you need tables, images or OCR:
+
+```python
+from pypdf import PdfReader          # PDF
+print("\n".join(p.extract_text() or "" for p in PdfReader("doc.pdf").pages))
+
+import docx                          # Word (.docx)
+print("\n".join(p.text for p in docx.Document("doc.docx").paragraphs))
+
+import openpyxl                      # Excel (.xlsx)
+wb = openpyxl.load_workbook("book.xlsx", read_only=True, data_only=True)
+for ws in wb.worksheets:
+    for row in ws.iter_rows(values_only=True):
+        print(ws.title, row)
+```
+
 ## Step 1: Remote URL Available?
 
 If the document has a URL, **always try `web_extract` first**:
