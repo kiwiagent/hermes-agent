@@ -159,6 +159,28 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
         skills["disabled"] = list(disabled) + missing
         dirty = True
 
+    # ---------- 4f) a fresh session every day, a lighter review ----------
+    # One session ran for days: every model call carried 60-140k tokens and
+    # replies waited ~45 s per compression. A new session at 4am local time
+    # (TZ is the user's), no notice; memory, skills, errands and cron stay.
+    # Compression keeps the last 10 messages (default 20, full of tool output).
+    # The skill review fork replays the whole session; run it after 30 tool
+    # steps instead of 10 (memory review unchanged).
+    wanted_reset = {"mode": "daily", "at_hour": 4, "notify": False}
+    reset = data.get("session_reset")
+    if not isinstance(reset, dict) or any(reset.get(k) != v for k, v in wanted_reset.items()):
+        data["session_reset"] = {**(reset if isinstance(reset, dict) else {}), **wanted_reset}
+        dirty = True
+    compression = data.get("compression")
+    if not isinstance(compression, dict):
+        compression = data["compression"] = {}
+    if compression.get("protect_last_n") != 10:
+        compression["protect_last_n"] = 10
+        dirty = True
+    if skills.get("creation_nudge_interval") != 30:
+        skills["creation_nudge_interval"] = 30
+        dirty = True
+
 # ---------- 5) realign cron jobs' model snapshot ----------
 # create_job() snapshots the default model; when the platform switches models
 # (HERMES_DEFAULT_MODEL), unpinned jobs then hit the drift guard and are

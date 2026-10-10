@@ -120,6 +120,39 @@ class TestNoDoubleConfirm:
         assert "approvals" not in _config(home)
 
 
+class TestSessionsAndReview:
+    """Replies slowed down as one session grew for days (60-140k tokens per
+    call, 45 s compressions); the skill review fork replayed it after most
+    replies."""
+
+    def test_smartbuddy_pod_NewSessionDailyAt4_NoNotice(self, home):
+        _run(home)
+
+        assert _config(home)["session_reset"] == {"mode": "daily", "at_hour": 4, "notify": False}
+
+    def test_smartbuddy_pod_CompressionKeepsLast10(self, home):
+        (home / "config.yaml").write_text(yaml.safe_dump({"model": {}, "compression": {"threshold": 0.5}}))
+
+        _run(home)
+
+        assert _config(home)["compression"] == {"threshold": 0.5, "protect_last_n": 10}
+
+    def test_smartbuddy_pod_SkillReviewEvery30Steps_KeepsDisabledSkills(self, home):
+        _run(home)
+
+        skills = _config(home)["skills"]
+        assert skills["creation_nudge_interval"] == 30
+        assert "himalaya" in skills["disabled"]
+
+    def test_non_smartbuddy_pod_LeavesThemAlone(self, home):
+        _run(home, SMARTBUDDY_AGENT_ID=None)
+
+        config = _config(home)
+        assert "session_reset" not in config
+        assert "compression" not in config
+        assert "creation_nudge_interval" not in config.get("skills", {})
+
+
 class TestLongRunningNotice:
     def test_smartbuddy_pod_FirstNoticeAtThreeMinutes(self, home):
         _run(home)
