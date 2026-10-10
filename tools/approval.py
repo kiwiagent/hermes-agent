@@ -787,6 +787,13 @@ DANGEROUS_PATTERNS = [
     # a script is first made executable then immediately run. The script
     # content may contain dangerous commands that individual patterns miss.
     (r'\bchmod\s+\+x\b.*[;&|]+\s*\./', "chmod +x followed by immediate execution"),
+    # kiwiagent: the platform's secrets. A buddy read the callback secret out
+    # of the gateway process (/proc/<pid>/environ) to upload files around the
+    # plugin. Any process environment, or a command naming the platform's
+    # secret variables, needs the user's OK. Input is lower-cased here; the
+    # user's own tokens ($NOTION_TOKEN …) and other /proc reads are untouched.
+    (r'/proc/[^\s/]+/environ\b', "read a process environment (may hold secrets)"),
+    (r'\b(?:smartbuddy|litellm)_[a-z0-9_]*(?:secret|key|token)\b', "read a platform secret"),
     # Sudo with stdin / askpass / shell / list-privs flags. An LLM-driven
     # agent has no TTY, so sudo invocations that succeed without human
     # interaction are those reading the password from stdin (-S/--stdin)

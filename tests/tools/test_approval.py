@@ -2561,3 +2561,37 @@ class TestApprovalPromptRedaction:
         # The script's credential must not appear in the user-facing message.
         assert "sk-proj-abc123xyz4567890abcdef" not in result["message"]
         assert "sk-proj-abc123xyz4567890abcdef" not in result["command"]
+
+
+class TestDetectPlatformSecretReads:
+    """kiwiagent: a buddy pulled the platform's callback secret out of the
+    gateway process (/proc/<pid>/environ) to upload files itself. Reading a
+    process environment, or naming the platform's secret variables, now
+    needs the user's OK; ordinary /proc reads and the user's own tokens don't."""
+
+    @pytest.mark.parametrize("command", [
+        "export SMARTBUDDY_CALLBACK_SECRET=$(tr '\\0' '\\n' < /proc/$(pgrep -f 'hermes gateway run'|head -1)/environ"
+        " | grep '^SMARTBUDDY_CALLBACK_SECRET=' | cut -d= -f2-)",
+        "cat /proc/1/environ",
+        "strings /proc/self/environ",
+        "python3 -c \"print(open('/proc/42/environ').read())\"",
+        "echo $SMARTBUDDY_CALLBACK_SECRET",
+        "curl -H \"Authorization: Bearer ${LITELLM_API_KEY}\" http://litellm/v1/models",
+        "printenv SMARTBUDDY_PLATFORM_TOKEN",
+    ])
+    def test_secret_read_needs_approval(self, command):
+        dangerous, _key, description = detect_dangerous_command(command)
+        assert dangerous is True
+        assert "secret" in description
+
+    @pytest.mark.parametrize("command", [
+        "cat /proc/cpuinfo",
+        "cat /proc/meminfo",
+        "echo $HOME",
+        "curl -H \"Authorization: Bearer $NOTION_TOKEN\" https://api.notion.com/v1/users/me",
+        "python3 /opt/hermes/plugins/platforms/smartbuddy/sb.py mail list",
+        "echo SMARTBUDDY_HOME_CHANNEL",
+    ])
+    def test_ordinary_commands_unaffected(self, command):
+        dangerous, _key, _description = detect_dangerous_command(command)
+        assert dangerous is False
