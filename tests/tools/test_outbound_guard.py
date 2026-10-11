@@ -25,6 +25,15 @@ class TestEmail:
         "service.users().messages().send(userId='me', body=raw).execute()",
         "service.users().drafts().send(userId='me', body={'id': d}).execute()",
         "curl -X POST https://gmail.googleapis.com/gmail/v1/users/me/messages/send -d @raw.json",
+        # himalaya, the SmartBuddy mail skill's CLI (bug: sent with no approval card).
+        'himalaya message compose -a me@x.co -t boss@example.com -s "Q3" --body-file b.txt --send --no-save',
+        "himalaya message reply -a me@x.co 42 --body-file b.txt --send --no-save",
+        "himalaya message forward -a me@x.co 42 -t ann@example.com",
+        "himalaya message send -a me@x.co < raw.eml",
+        "himalaya message write -a me@x.co",
+        "himalaya template send -a me@x.co < tpl.eml",
+        "/opt/data/.local/bin/himalaya --output json message reply 7 --send",
+        "subprocess.run(['himalaya', 'message', 'send', '-a', acct], input=raw)",
     ])
     def test_detected(self, text):
         found, key, desc = detect_outbound_action(text)
@@ -33,6 +42,17 @@ class TestEmail:
 
     def test_reading_mail_is_not_outbound(self):
         text = "import imaplib\nM = imaplib.IMAP4_SSL('imap.gmail.com')\nM.select('INBOX')"
+        assert detect_outbound_action(text)[0] is False
+
+    @pytest.mark.parametrize("text", [
+        'himalaya envelope search -a me@x.co subject "invoice"',
+        "himalaya envelope list -a me@x.co --page-size 20",
+        "himalaya message read -a me@x.co 42",
+        "himalaya attachment list -a me@x.co 42",
+        "himalaya attachment download -a me@x.co 42 --dir ~/mail-attachments",
+        "himalaya folder list -a me@x.co",
+    ])
+    def test_reading_mail_with_himalaya_is_not_outbound(self, text):
         assert detect_outbound_action(text)[0] is False
 
 

@@ -34,6 +34,9 @@ _EMAIL_PATTERNS = [
     r"\bmutt\b\s",
     r"\b(?:messages|drafts)\(\)\s*\.\s*send\s*\(",
     r"gmail\.googleapis\.com/\S*/(?:messages|drafts)/send",
+    # himalaya (SmartBuddy mail skill): message send/write/compose/reply/forward,
+    # template send — also as a subprocess argument list. Reads don't match.
+    r"""\bhimalaya\b[^\n;|&]*?\b(?:message|msg|template|tpl)['"]?[\s,'"]+(?:send|write|compose|reply|forward|fwd)\b""",
 ]
 
 _MESSAGE_PATTERNS = [
