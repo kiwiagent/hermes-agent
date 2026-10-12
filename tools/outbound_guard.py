@@ -376,6 +376,30 @@ def _any(patterns, text: str) -> bool:
     return any(p.search(text) for p in patterns)
 
 
+# curl -G / --get sends -d / --data-urlencode values as the URL query (a GET):
+# map lookups and web searches. Short-flag clusters only count when every
+# other letter is a flag without an argument (-sG, -GsS; not -XGET).
+_CURL_SEGMENT_SPLIT_RE = re.compile(r"(\n|;|\||&)")
+_CURL_GET_FLAG_RE = re.compile(r"(?:^|\s)(?:-[sSLkfivqg]*G[sSLkfivqg]*|--get)(?=\s|$)")
+_CURL_GET_WRITE_RE = re.compile(
+    r"(?:^|\s)(?:-X\s*['\"]?|--request[\s=]+['\"]?)(?![Gg][Ee][Tt]\b|[Hh][Ee][Aa][Dd]\b)"
+    r"|(?:^|\s)(?:-[a-zA-Z]*[FT]|--(?:form|upload-file|json)\b)"
+)
+
+
+def _without_curl_get_reads(text: str) -> str:
+    """``text`` with each curl -G / --get lookup blanked out, so its query
+    data isn't taken for a write. A segment that also sets a write method or
+    uploads (-X POST, -T, -F, --json) is kept."""
+    parts = _CURL_SEGMENT_SPLIT_RE.split(text)
+    for i in range(0, len(parts), 2):
+        part = parts[i]
+        if (re.search(r"\bcurl\b", part) and _CURL_GET_FLAG_RE.search(part)
+                and not _CURL_GET_WRITE_RE.search(part)):
+            parts[i] = ""
+    return "".join(parts)
+
+
 def detect_outbound_action(text: str) -> OutboundMatch:
     """Return (found, key, description) for an outbound action in ``text``.
 
@@ -388,6 +412,7 @@ def detect_outbound_action(text: str) -> OutboundMatch:
         return True, "outbound:email", "send an email"
     if _any(_MESSAGE_RE, text):
         return True, "outbound:message", "send a message to someone"
+    text = _without_curl_get_reads(text)
     if _any(_HTTP_WRITE_RE, text):
         hosts = [h.lower() for h in _URL_HOST_RE.findall(text)]
         external = [h for h in hosts if not _INTERNAL_HOST_RE.match(h)]
