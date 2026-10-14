@@ -310,3 +310,50 @@ class TestCoreNeverShadowed:
             sys.path[:] = saved
             sys.modules.pop("packaging", None)
             importlib.invalidate_caches()
+
+
+class TestConstraintsSkipDurableTarget:
+    """kiwiagent: the constraints file pins *core* packages only. Packages
+    already in the durable target were pinned too, so bumping a lazy pin
+    (edge-tts 7.2.7 → 7.3.1, 7.2.7 got 403) made the install unsatisfiable
+    ("edge-tts==7.3.1 and edge-tts==7.2.7") and the old version stayed."""
+
+    def _plant_dist(self, target: Path, name: str, version: str) -> None:
+        info = target / f"{name.replace('-', '_')}-{version}.dist-info"
+        info.mkdir(parents=True)
+        (info / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+        )
+
+    def test_package_in_target_not_pinned(self, tmp_path, monkeypatch):
+        target = tmp_path / "lazy-packages"
+        monkeypatch.setenv(ld._LAZY_TARGET_ENV, str(target))
+        ld._ensure_target_ready(target)
+        self._plant_dist(target, "kiwi-stale-lazy-pkg", "1.0.0")
+        saved = list(sys.path)
+        try:
+            ld._activate_target_on_syspath(target)
+            path = ld._core_constraints_file()
+            lines = path.read_text().splitlines()
+            path.unlink()
+        finally:
+            sys.path[:] = saved
+        assert not [l for l in lines if l.lower().startswith("kiwi-stale-lazy-pkg==")]
+        # Core packages are still pinned.
+        assert [l for l in lines if l.lower().startswith("packaging==")]
+
+    @pytest.mark.skipif(
+        os.environ.get("HERMES_RUN_NETWORK_TESTS") != "1",
+        reason="opt-in real-install test (set HERMES_RUN_NETWORK_TESTS=1)",
+    )
+    def test_pin_bump_upgrades_package_in_target(self, tmp_path, monkeypatch):
+        target = tmp_path / "lazy-packages"
+        monkeypatch.setenv(ld._LAZY_TARGET_ENV, str(target))
+        saved = list(sys.path)
+        try:
+            assert ld._venv_pip_install(("inflection==0.5.0",)).success
+            result = ld._venv_pip_install(("inflection==0.5.1",))
+        finally:
+            sys.path[:] = saved
+        assert result.success, f"upgrade failed: {result.stderr}"
+        assert [p.name for p in target.glob("inflection-*.dist-info")] == ["inflection-0.5.1.dist-info"]
