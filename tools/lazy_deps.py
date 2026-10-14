@@ -597,7 +597,17 @@ def _core_constraints_file() -> Optional[Path]:
         import tempfile
         lines = []
         seen = set()
+        # kiwiagent: packages already in the durable target are not core.
+        # Pinning them made a lazy pin bump unsatisfiable (old == new).
+        target = _lazy_install_target()
+        target_dir = target.resolve() if target is not None else None
         for dist in distributions():
+            if target_dir is not None:
+                try:
+                    if Path(dist.locate_file("")).resolve() == target_dir:
+                        continue
+                except Exception:
+                    pass
             name = dist.metadata["Name"] if dist.metadata else None
             ver = dist.version
             if not name or not ver:
