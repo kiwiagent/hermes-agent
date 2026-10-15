@@ -779,6 +779,64 @@ class TestDeliverResultWrapping:
         assert adapter.send_image_file.call_args[1]["image_path"] == str(media_path)
         adapter.send_voice.assert_not_called()
 
+    def _deliver_document(self, tmp_path, monkeypatch, origin):
+        """Deliver one cron result with a document; return the adapter."""
+        from gateway.config import Platform
+        from concurrent.futures import Future
+        media_path = self._safe_media_path(tmp_path, monkeypatch, "weekend.txt")
+
+        adapter = AsyncMock()
+        adapter.send.return_value = MagicMock(success=True)
+        adapter.send_document.return_value = MagicMock(success=True)
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.DISCORD: pconfig}
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+
+        def fake_run_coro(coro, _loop):
+            import asyncio as _asyncio
+            future = Future()
+            try:
+                future.set_result(_asyncio.run(coro))
+            except BaseException as _e:  # noqa: BLE001
+                future.set_exception(_e)
+            return future
+
+        job = {"id": "weekend-job", "deliver": "origin", "origin": origin}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro):
+            _deliver_result(
+                job,
+                f"This weekend\nMEDIA:{media_path}",
+                adapters={Platform.DISCORD: adapter},
+                loop=loop,
+            )
+        return adapter
+
+    def test_live_adapter_media_carries_job_id(self, tmp_path, monkeypatch):
+        """Attachments carry the job id like the text does, so a platform can tell
+        they belong to the scheduled job (not to whatever the chat did last)."""
+        adapter = self._deliver_document(
+            tmp_path, monkeypatch, {"platform": "discord", "chat_id": "1234"})
+
+        assert adapter.send.call_args[1]["metadata"]["job_id"] == "weekend-job"
+        adapter.send_document.assert_called_once()
+        assert adapter.send_document.call_args[1]["metadata"]["job_id"] == "weekend-job"
+
+    def test_live_adapter_media_in_thread_carries_job_id_and_thread(self, tmp_path, monkeypatch):
+        adapter = self._deliver_document(
+            tmp_path, monkeypatch, {"platform": "discord", "chat_id": "1234", "thread_id": "77"})
+
+        metadata = adapter.send_document.call_args[1]["metadata"]
+        assert metadata["job_id"] == "weekend-job"
+        assert metadata["thread_id"] == "77"
+
     def test_live_adapter_media_only_no_text(self, tmp_path, monkeypatch):
         """When content is ONLY a MEDIA tag with no text, media should still be sent."""
         from gateway.config import Platform
