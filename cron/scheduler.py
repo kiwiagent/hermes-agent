@@ -1797,7 +1797,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 }
                 # Media metadata mirrors the text routing so attachments land in
                 # the same DM topic instead of the General lane (#22773).
-                media_metadata = {"direct_messages_topic_id": str(thread_id)}
+                media_metadata = {"direct_messages_topic_id": str(thread_id), "job_id": job["id"]}
             else:
                 # Forum-style topic (private chat / supergroup) or non-topic
                 # target: route via message_thread_id (#52060).  Put thread_id in
@@ -1811,7 +1811,11 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 route_metadata = {"job_id": job["id"]}
                 if route_thread_id:
                     route_metadata["thread_id"] = route_thread_id
-                media_metadata = {"thread_id": thread_id} if thread_id else None
+                # job_id too, like the text: platforms file the attachments under
+                # the job, not under whatever the chat did last.
+                media_metadata = {"job_id": job["id"]}
+                if thread_id:
+                    media_metadata["thread_id"] = thread_id
 
             try:
                 # Send cleaned text (MEDIA tags stripped) — not the raw content.
