@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 SCRIPT = Path(__file__).resolve().parents[2] / "docker" / "cont-init.d" / "025-kiwiagent-api-server"
 

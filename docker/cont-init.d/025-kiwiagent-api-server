@@ -36,7 +36,11 @@ if [ ! -f "$CFG" ]; then
 fi
 
 exec s6-setuidgid hermes /opt/hermes/.venv/bin/python - <<'PY'
-import os, sys, yaml, pathlib
+import os, sys, pathlib
+# 0.22 ships ruamel behind hermes_yaml, not PyYAML; /opt/hermes isn't on the
+# path of this stdin script.
+sys.path.insert(0, "/opt/hermes")
+import hermes_yaml as yaml
 
 cfg_path = pathlib.Path(os.environ.get("HERMES_HOME", "/opt/data")) / "config.yaml"
 data = yaml.safe_load(cfg_path.read_text()) or {}
