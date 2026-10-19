@@ -190,6 +190,30 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
         skills["creation_nudge_interval"] = 30
         dirty = True
 
+    # ---------- 4g) hermes 0.22: same compression point, reminders always loaded ----------
+    # 0.22 can't read the context length from LiteLLM and falls back to 256k
+    # (its catalog says 1M for deepseek-flash); 0.18 used 128k. Compression is
+    # set off that number, so sessions would grow past twice today's size
+    # before compressing. Keep 128k until measured otherwise.
+    model_cfg = data.setdefault("model", {})
+    if model_cfg.get("context_length") != 128000:
+        model_cfg["context_length"] = 128000
+        dirty = True
+    # 0.22 loads the cron tool on demand (tool_search): every reminder change
+    # cost an extra model call to look the tool up. Keep hermes' own default
+    # list minus cronjob_manage (an explicit list replaces the default).
+    try:
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+        default_defer = list(DEFAULT_CONFIG["tools"]["tool_search"]["defer"])
+    except Exception:
+        default_defer = None
+    if default_defer is not None:
+        wanted_defer = [n for n in default_defer if n != "cronjob_manage"]
+        tool_search = data.setdefault("tools", {}).setdefault("tool_search", {})
+        if tool_search.get("defer") != wanted_defer:
+            tool_search["defer"] = wanted_defer
+            dirty = True
+
 # ---------- 5) realign cron jobs' model snapshot ----------
 # create_job() snapshots the default model; when the platform switches models
 # (HERMES_DEFAULT_MODEL), unpinned jobs then hit the drift guard and are
