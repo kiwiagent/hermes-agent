@@ -478,6 +478,102 @@ def save_permanent_allowlist(patterns: set):
         logger.warning("Could not save allowlist: %s", e)
 
 
+def list_permanent_approvals() -> list:
+    """kiwiagent: the always-allowed actions, for the SmartBuddy app.
+
+    ``outbound:http:<host>`` keys are ``kind: http`` (target = host); other
+    non-outbound keys are ``kind: command``. Email / message / publish keys
+    can never be always-allowed, so a hand-written one is never listed.
+    """
+    from tools.outbound_guard import allowable_http_host
+    with _lock:
+        keys = sorted(k for k in _permanent_set() if isinstance(k, str))
+    http, commands = [], []
+    for key in keys:
+        host = allowable_http_host(key)
+        if host:
+            http.append({"key": key, "kind": "http", "target": host})
+        elif not _is_outbound_key(key):
+            commands.append({"key": key, "kind": "command", "target": key})
+    return http + commands
+
+
+def revoke_permanent(pattern_key: str) -> bool:
+    """kiwiagent: remove a key from the permanent allowlist and from config.yaml.
+    False if absent. (save_permanent_allowlist only adds, so this edits the file.)"""
+    from hermes_cli.config import load_config, save_config
+    with _lock:
+        governing = _permanent_set()
+        if pattern_key not in governing:
+            return False
+        config = load_config()
+        on_disk = [k for k in (config.get("command_allowlist", []) or []) if k != pattern_key]
+        config["command_allowlist"] = sorted(set(on_disk))
+        save_config(config)
+        _permanent_baseline_by_home[_baseline_key()] = set(on_disk)
+        governing.discard(pattern_key)
+    return True
+
+
+# --- kiwiagent: outbound actions (sending in the user's name) always ask ---------------------------------------------
+
+def _outbound_confirm_enabled() -> bool:
+    """approvals.outbound_confirm — anything sent out in the user's name (email,
+    messages, writes to external services) always asks the user. SmartBuddy
+    turns it on; off by default."""
+    return bool(approval_context._get_approval_config().get("outbound_confirm", False))
+
+
+def _detect_outbound(command: Optional[str] = None, code: Optional[str] = None):
+    """(found, key, description) when outbound_confirm is on, else no match.
+    A write to a host the user always-allowed is no match (also from cron)."""
+    if not _outbound_confirm_enabled():
+        return False, None, None
+    from tools.outbound_guard import detect_outbound_action, detect_outbound_command
+    found, key, desc = detect_outbound_action(code) if code is not None else detect_outbound_command(command or "")
+    if found and _outbound_host_allowed(key):
+        return False, None, None
+    return found, key, desc
+
+
+def _outbound_block_result(description: str, key: str) -> dict:
+    """No user can approve right now (cron / headless): never send; in a
+    scheduled job, deliver the draft to the user instead."""
+    if _is_cron_approval_context():
+        message = (
+            f"BLOCKED: this would {description} on the user's behalf. Nothing is "
+            "sent out without the user's approval, and no one is here to approve "
+            "it in a scheduled job. Do NOT send it any other way. Instead, put "
+            "the complete draft (recipient, subject and full text, or exactly "
+            "what would be submitted) in your final reply so the user receives "
+            "it, and tell them to reply \"send it\" if they want you to send it."
+        )
+    else:
+        message = (
+            f"BLOCKED: this would {description} on the user's behalf and needs "
+            "the user's approval, which can't be requested here. Do NOT send it "
+            "any other way; show the user the draft instead."
+        )
+    return {"approved": False, "message": message, "pattern_key": key, "description": description,
+            "outcome": "blocked", "user_consent": False}
+
+
+def _is_outbound_key(key: Optional[str]) -> bool:
+    return isinstance(key, str) and key.startswith("outbound:")
+
+
+def _outbound_can_be_permanent(key: Optional[str]) -> bool:
+    """Only an http write to one external host (outbound:http:<host>) may be
+    always-allowed. Email, messages and publishing as the user never."""
+    from tools.outbound_guard import allowable_http_host
+    return allowable_http_host(key) is not None
+
+
+def _outbound_host_allowed(key: Optional[str]) -> bool:
+    """True when the user always-allowed this outbound:http:<host> key."""
+    return _outbound_can_be_permanent(key) and _is_permanently_approved(key)
+
+
 # --- Bypass check (yolo / mode=off) ---------------------------------------------------------------------------------
 
 def is_approval_bypass_active_for_session(session_key: str) -> bool:
@@ -773,7 +869,8 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
 def _human_decision(spec: _GateSpec, *, command: str, description: str,
                     pattern_key: str, pattern_keys: list[str],
                     session_key: str, approval_callback, is_cli: bool, is_gateway: bool,
-                    is_ask: bool, smart: bool = False, pending_body=None) -> dict:
+                    is_ask: bool, smart: bool = False, pending_body=None,
+                    outbound_key: Optional[str] = None) -> dict:
     """Ask a human (after the optional guardian-LLM step) and turn the answer into the gate result.
 
     ``pattern_keys`` are what :func:`_persist_choice` stores on session/always; a smart-DENY
@@ -782,6 +879,10 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     """
     from agent.redact import redact_sensitive_text
 
+    # kiwiagent: a send in the user's name is the user's own decision every time:
+    # never smart-approved, no session scope, "always" only for an http host.
+    if outbound_key:
+        smart = False
     smart_denied = False
     if smart:
         result, smart_denied = _smart_gate(spec, command, description, pattern_key, pattern_keys,
@@ -789,7 +890,8 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
         if result is not None:
             return result
     pending_body = pending_body() if pending_body else None
-    allow_permanent = not smart_denied
+    allow_permanent = not smart_denied and (not outbound_key or _outbound_can_be_permanent(outbound_key))
+    allow_session = not smart_denied and not outbound_key
 
     def deny(template: str, outcome: str, **fmt) -> dict:
         breaker = ""
@@ -804,7 +906,12 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     def grant(choice: str) -> dict:
         # A smart-DENY owner override is always one operation, even if an older client returns "session" or "always".
         if not smart_denied:
-            _persist_choice(session_key, choice, pattern_keys)
+            _persist_choice(session_key, choice, [k for k in pattern_keys if not _is_outbound_key(k)])
+        if outbound_key and choice == "always" and allow_permanent:
+            approve_permanent(outbound_key)
+            with _lock:
+                snapshot = set(_permanent_set())
+            save_permanent_allowlist(snapshot)
         if spec.user_approved:
             return _user_approved(session_key, description)
         return _approved()
@@ -813,7 +920,7 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
         attempt = _present_with_selected_transport(
             command=command, description=description, pattern_key=pattern_key, pattern_keys=pattern_keys,
             session_key=session_key, surface="gateway" if (is_gateway or is_ask) else "cli",
-            allow_session=not smart_denied, allow_permanent=allow_permanent,
+            allow_session=allow_session, allow_permanent=allow_permanent,
         )
         choice, denied = _transport_choice(attempt, pattern_key=pattern_key, description=description)
         if denied is not None:
@@ -838,8 +945,8 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
             data = {
                 "command": display_command, "pattern_key": pattern_key,
                 "pattern_keys": pattern_keys, "description": display_description,
-                "allow_permanent": not smart_denied,
-                "allow_session": not smart_denied,
+                "allow_permanent": allow_permanent,
+                "allow_session": allow_session,
             }
             if smart_denied:
                 data["smart_denied"] = True
@@ -1146,13 +1253,17 @@ def check_all_command_guards(command: str, env_type: str,
     approval_mode = approval_context._get_approval_mode()
     if _yolo_active() or approval_mode == "off":
         return _approved()
-    if _command_matches_permanent_allowlist(command):
+    # kiwiagent: sending something out in the user's name always asks.
+    outbound, outbound_key, outbound_desc = _detect_outbound(command=command)
+    if not outbound and _command_matches_permanent_allowlist(command):
         return _approved()
 
     approval_callback, is_cli, is_gateway, is_ask = _presence(approval_callback)
     # Outside CLI/gateway/ask flows we never block on approvals: each
     # unattended context applies its configured deny/approve mode, else allow.
     if not is_cli and not is_gateway and not is_ask:
+        if outbound:
+            return _outbound_block_result(outbound_desc, outbound_key)
         for ctx in _unattended_contexts():
             result = _unattended_deny(command, ctx)
             if result is not None:
@@ -1161,8 +1272,20 @@ def check_all_command_guards(command: str, env_type: str,
 
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
     session_key = get_current_session_key()
-    if not is_dangerous or is_approved(session_key, pattern_key):
+    if is_dangerous and is_approved(session_key, pattern_key):
+        is_dangerous = False
+    if not is_dangerous and not outbound:
         return _approved()
+    if outbound:
+        # Never pre-approved: every send is its own decision.
+        keys = ([pattern_key] if is_dangerous else []) + [outbound_key]
+        description = f"{description}; {outbound_desc}" if is_dangerous else outbound_desc
+        return _human_decision(
+            _COMMAND_GATE, command=command, description=description,
+            pattern_key=keys[0], pattern_keys=keys,
+            session_key=session_key, approval_callback=approval_callback,
+            is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask, outbound_key=outbound_key,
+        )
     return _human_decision(
         _COMMAND_GATE, command=command, description=description,
         pattern_key=pattern_key, pattern_keys=[pattern_key],
@@ -1204,10 +1327,16 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     if _yolo_active() or approval_mode == "off":
         return _approved()
 
+    # kiwiagent: a script that sends something out in the user's name always
+    # asks — never smart-approved, never covered by an earlier approval.
+    outbound, outbound_key, outbound_desc = _detect_outbound(code=code)
+
     # (-q clears the presence flags, but its unattended context resolves first anyway.)
     approval_callback, is_cli, is_gateway, is_ask = _presence()
     # No user is present to approve arbitrary code in -q / cron / unattended
     # sessions: the first active context resolves instantly from its mode.
+    if outbound and _unattended_contexts():
+        return _outbound_block_result(outbound_desc, outbound_key)
     for ctx in _unattended_contexts():
         if ctx.mode() == "deny":
             return _denied(
@@ -1223,11 +1352,23 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     # and messaging ask-mode drive whole-script approval); when that leaks into a CLI with no notify callback, the
     # engine falls through to the CLI Dangerous Command panel instead of a silent pending_approval.
     if not is_gateway and not is_ask:
+        if outbound:
+            return _outbound_block_result(outbound_desc, outbound_key)
         return _approved()
 
     session_key = get_current_session_key()
     # Built only past the early-return gates so common paths don't copy a potentially-large script into this string.
     command = f"execute_code <<'PY'\n{code}\nPY"
+
+    if outbound:
+        from agent.redact import redact_sensitive_text
+        return _human_decision(
+            _EXECUTE_CODE_GATE, command=command, description=outbound_desc, pattern_key=outbound_key,
+            pattern_keys=[outbound_key], session_key=session_key,
+            approval_callback=approval_callback, is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask,
+            pending_body=lambda: f"**Code:**\n```python\n{redact_sensitive_text(code)}\n```",
+            outbound_key=outbound_key,
+        )
 
     # Without this, "Approve session" / "Always" choices are stored but never
     # consulted, so every execute_code call re-prompts (#39275).

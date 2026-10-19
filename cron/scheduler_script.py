@@ -447,6 +447,19 @@ def _run_job_script(
     path, err = _resolve_script_path(script_path)
     if path is None:
         return False, err
+    # kiwiagent: scheduled jobs never send anything out in the user's name
+    # (approvals.outbound_confirm) — no one is here to approve it.
+    try:
+        from tools.approval import _detect_outbound
+        outbound, _key, outbound_desc = _detect_outbound(
+            code=path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        outbound = False
+    if outbound:
+        return False, (
+            f"Outbound blocked: this script would {outbound_desc} on the user's "
+            "behalf, which needs their approval each time."
+        )
     script_timeout = _get_script_timeout()
     try:
         argv, env_overlay, err = _script_argv(path, interpreter)

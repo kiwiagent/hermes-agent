@@ -184,8 +184,17 @@ def _cron_friendly_failures_enabled() -> bool:
 def _friendly_cron_failure_message(job: dict, error: str | None, *, paused: bool = False) -> str:
     """Plain-language failure notice for end users (no raw error text).
 
-    Chinese when the job's name/prompt is Chinese, English otherwise.
+    Chinese when the job's name/prompt is Chinese (Traditional when it's
+    written in Traditional), English otherwise.
     """
+    text = _friendly_cron_failure_text(job, error, paused=paused)
+    from cron.zh_variants import is_traditional, to_traditional
+    if is_traditional(f"{job.get('name') or ''}{job.get('prompt') or ''}"):
+        return to_traditional(text)
+    return text
+
+
+def _friendly_cron_failure_text(job: dict, error: str | None, *, paused: bool = False) -> str:
     name = job.get("name") or job.get("id") or "scheduled task"
     zh = bool(_CJK_RE.search(f"{job.get('name') or ''}{job.get('prompt') or ''}"))
     recurring = (job.get("schedule") or {}).get("kind") != "once"
@@ -198,6 +207,14 @@ def _friendly_cron_failure_message(job: dict, error: str | None, *, paused: bool
         return (f"\"{name}\" failed {_FRIENDLY_FAILURE_PAUSE_AFTER} times in a row, so I've paused it "
                 f"to stop sending you errors. Say \"resume {name}\" when you want it back, "
                 f"or ask me to fix it.")
+
+    if text.startswith("Outbound blocked:"):
+        if zh:
+            return (f"「{name}」需要替你对外发送内容，每次都要先经过你确认，所以这次没有自动执行。"
+                    f"想现在发的话跟我说一声，我会先把要发的内容给你看。")
+        return (f"\"{name}\" needs to send something on your behalf, and that always needs your OK "
+                f"— so it didn't run on its own. Tell me if you'd like to send it now and I'll "
+                f"show you exactly what goes out first.")
 
     if _MISSING_FILE_RE.search(text):
         # The agent set the job up wrong — own it, don't make the user re-explain.

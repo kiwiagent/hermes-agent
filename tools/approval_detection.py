@@ -459,6 +459,13 @@ DANGEROUS_PATTERNS = [
     (r'\bgit\s+branch\b[^;|&\n]*?(?:-f\b|--force\b)[^;|&\n]*?(?:-d\b|--delete\b)', "git branch force delete (long flags, force-first)"),
     # chmod +x then immediate run: the script content may hold dangerous commands individual patterns miss.
     (r'\bchmod\s+\+x\b.*[;&|]+\s*\./', "chmod +x followed by immediate execution"),
+    # kiwiagent: the platform's secrets. A buddy read the callback secret out
+    # of the gateway process (/proc/<pid>/environ) to upload files around the
+    # plugin. Any process environment, or a command naming the platform's
+    # secret variables, needs the user's OK. Input is lower-cased here; the
+    # user's own tokens ($NOTION_TOKEN …) and other /proc reads are untouched.
+    (r'/proc/[^\s/]+/environ\b', "read a process environment (may hold secrets)"),
+    (r'\b(?:smartbuddy|litellm)_[a-z0-9_]*(?:secret|key|token)\b', "read a platform secret"),
     # Sudo stdin/askpass/shell/list-privs flags. The agent has no TTY, so sudo invocations that succeed
     # non-interactively read the password from stdin (-S) or askpass (-A); -s (shell) and -a (list) are gated as
     # privilege chains (read SUDO_PASSWORD from .env -> sudo -S -s). Plain `sudo cmd` is TTY-bound and excluded. Input

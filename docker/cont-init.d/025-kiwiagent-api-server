@@ -126,6 +126,12 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
     if any(display.get(k) != v for k, v in wanted.items()):
         display.update(wanted)
         dirty = True
+    # One "still working" notice per task, at 3 minutes (the plugin drops the
+    # repeats — it can't edit messages, so each would be a new push).
+    agent_cfg = data.setdefault("agent", {})
+    if agent_cfg.get("gateway_notify_interval") != 180:
+        agent_cfg["gateway_notify_interval"] = 180
+        dirty = True
 
     # ---------- 4c) no double confirm for /new ----------
     # The app's "New chat" already asks "Start a new chat?" before sending
@@ -134,6 +140,49 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
     approvals = data.setdefault("approvals", {})
     if approvals.get("destructive_slash_confirm") is not False:
         approvals["destructive_slash_confirm"] = False
+        dirty = True
+
+    # ---------- 4d) outbound actions always ask ----------
+    # "Every action needs your approval": email, messages to other people and
+    # writes to external services always prompt the user (never smart-
+    # approved); cron jobs never send — they deliver a draft instead.
+    if approvals.get("outbound_confirm") is not True:
+        approvals["outbound_confirm"] = True
+        dirty = True
+
+    # ---------- 4e) mail only through the SmartBuddy connector ----------
+    # himalaya / google-workspace keep mail passwords or Google tokens inside
+    # the pod and would compete with the plugin's smartbuddy-mail skill
+    # (password stays in the console). Keep anything else already disabled.
+    skills = data.setdefault("skills", {})
+    disabled = skills.get("disabled") or []
+    if isinstance(disabled, str):
+        disabled = [disabled]
+    missing = [n for n in ("himalaya", "google-workspace") if n not in disabled]
+    if missing:
+        skills["disabled"] = list(disabled) + missing
+        dirty = True
+
+    # ---------- 4f) a fresh session every day, a lighter review ----------
+    # One session ran for days: every model call carried 60-140k tokens and
+    # replies waited ~45 s per compression. A new session at 4am local time
+    # (TZ is the user's), no notice; memory, skills, errands and cron stay.
+    # Compression keeps the last 10 messages (default 20, full of tool output).
+    # The skill review fork replays the whole session; run it after 30 tool
+    # steps instead of 10 (memory review unchanged).
+    wanted_reset = {"mode": "daily", "at_hour": 4, "notify": False}
+    reset = data.get("session_reset")
+    if not isinstance(reset, dict) or any(reset.get(k) != v for k, v in wanted_reset.items()):
+        data["session_reset"] = {**(reset if isinstance(reset, dict) else {}), **wanted_reset}
+        dirty = True
+    compression = data.get("compression")
+    if not isinstance(compression, dict):
+        compression = data["compression"] = {}
+    if compression.get("protect_last_n") != 10:
+        compression["protect_last_n"] = 10
+        dirty = True
+    if skills.get("creation_nudge_interval") != 30:
+        skills["creation_nudge_interval"] = 30
         dirty = True
 
 # ---------- 5) realign cron jobs' model snapshot ----------

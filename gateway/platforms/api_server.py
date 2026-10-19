@@ -1803,6 +1803,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("POST", "/api/sessions/{session_id}/chat/stream", self._handle_session_chat_stream),
             ("POST", "/api/sessions/{session_id}/model", self._handle_session_model_lock),
             ("GET", "/api/files/{b64_path}", self._handle_file_serve),
+            ("GET", "/api/approvals/permanent", self._handle_list_permanent_approvals),
+            ("DELETE", "/api/approvals/permanent", self._handle_revoke_permanent_approval),
             ("POST", "/v1/chat/completions", self._handle_chat_completions),
             ("POST", "/v1/responses", self._handle_responses),
             ("GET", "/v1/responses/{response_id}", self._handle_get_response),
@@ -3689,6 +3691,27 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if path is None:
             return _error_response("File not found", 404, code="file_not_found")
         return web.FileResponse(str(path))
+
+    # kiwiagent: permanent ("always allow") approvals, for the SmartBuddy app.
+
+    async def _handle_list_permanent_approvals(self, request: web.Request) -> web.Response:
+        """GET /api/approvals/permanent — the user's always-allowed actions."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        from tools.approval import list_permanent_approvals
+        return web.json_response({"items": list_permanent_approvals()})
+
+    async def _handle_revoke_permanent_approval(self, request: web.Request) -> web.Response:
+        """DELETE /api/approvals/permanent?key=<key> — revoke one always-allow."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        key = request.query.get("key", "")
+        if not key:
+            return web.json_response({"error": "key is required"}, status=400)
+        from tools.approval import revoke_permanent
+        return web.json_response({"removed": await asyncio.to_thread(revoke_permanent, key)})
 
     @_admit_api_agent_request
     async def _handle_session_chat_stream(self, request: web.Request) -> web.StreamResponse:

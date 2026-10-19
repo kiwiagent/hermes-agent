@@ -120,6 +120,95 @@ class TestNoDoubleConfirm:
         assert "approvals" not in _config(home)
 
 
+class TestSessionsAndReview:
+    """Replies slowed down as one session grew for days (60-140k tokens per
+    call, 45 s compressions); the skill review fork replayed it after most
+    replies."""
+
+    def test_smartbuddy_pod_NewSessionDailyAt4_NoNotice(self, home):
+        _run(home)
+
+        assert _config(home)["session_reset"] == {"mode": "daily", "at_hour": 4, "notify": False}
+
+    def test_smartbuddy_pod_CompressionKeepsLast10(self, home):
+        (home / "config.yaml").write_text(yaml.safe_dump({"model": {}, "compression": {"threshold": 0.5}}))
+
+        _run(home)
+
+        assert _config(home)["compression"] == {"threshold": 0.5, "protect_last_n": 10}
+
+    def test_smartbuddy_pod_SkillReviewEvery30Steps_KeepsDisabledSkills(self, home):
+        _run(home)
+
+        skills = _config(home)["skills"]
+        assert skills["creation_nudge_interval"] == 30
+        assert "himalaya" in skills["disabled"]
+
+    def test_non_smartbuddy_pod_LeavesThemAlone(self, home):
+        _run(home, SMARTBUDDY_AGENT_ID=None)
+
+        config = _config(home)
+        assert "session_reset" not in config
+        assert "compression" not in config
+        assert "creation_nudge_interval" not in config.get("skills", {})
+
+
+class TestLongRunningNotice:
+    def test_smartbuddy_pod_FirstNoticeAtThreeMinutes(self, home):
+        _run(home)
+
+        assert _config(home)["agent"]["gateway_notify_interval"] == 180
+
+    def test_smartbuddy_pod_OldFiveMinuteSetting_LoweredToThree(self, home):
+        (home / "config.yaml").write_text(
+            yaml.safe_dump({"model": {}, "agent": {"gateway_notify_interval": 300}}))
+
+        _run(home)
+
+        assert _config(home)["agent"]["gateway_notify_interval"] == 180
+
+    def test_smartbuddy_pod_KeepsOtherAgentKeys(self, home):
+        (home / "config.yaml").write_text(yaml.safe_dump({"model": {}, "agent": {"max_turns": 90}}))
+
+        _run(home)
+
+        assert _config(home)["agent"]["max_turns"] == 90
+
+    def test_non_smartbuddy_pod_LeavesAgentAlone(self, home):
+        _run(home, SMARTBUDDY_AGENT_ID=None)
+
+        assert "agent" not in _config(home)
+
+
+class TestMailOnlyThroughConnector:
+    """himalaya / google-workspace would keep mail passwords inside the pod;
+    SmartBuddy reads mail through the console (smartbuddy-mail skill)."""
+
+    def test_smartbuddy_pod_DisablesBundledMailSkills(self, home):
+        _run(home)
+
+        assert {"himalaya", "google-workspace"} <= set(_config(home)["skills"]["disabled"])
+
+    def test_smartbuddy_pod_KeepsOtherDisabledSkills_NoDuplicates(self, home):
+        (home / "config.yaml").write_text(yaml.safe_dump(
+            {"model": {}, "skills": {"disabled": ["yuanbao", "himalaya"]}}))
+
+        _run(home)
+        _run(home)
+
+        assert _config(home)["skills"]["disabled"] == ["yuanbao", "himalaya", "google-workspace"]
+
+    def test_smartbuddy_pod_EnablesOutboundConfirm(self, home):
+        _run(home)
+
+        assert _config(home)["approvals"]["outbound_confirm"] is True
+
+    def test_non_smartbuddy_pod_LeavesSkillsAlone(self, home):
+        _run(home, SMARTBUDDY_AGENT_ID=None)
+
+        assert "skills" not in _config(home)
+
+
 class TestCronModelSnapshotRealign:
     def test_unpinned_job_with_stale_snapshot_IsRealignedToCurrentModel(self, home):
         _write_jobs(home, [{"id": "a", "name": "Ballet", "model": None, "model_snapshot": "qwen-plus"}])
