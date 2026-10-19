@@ -181,6 +181,44 @@ class TestSessionsAndReview:
         assert "creation_nudge_interval" not in config.get("skills", {})
 
 
+class TestNoNousHostedConnectors:
+    """0.22's hosted connectors (manage_connections) mint an anonymous Nous
+    account and keep the user's mail tokens with Nous; their Gmail send skips
+    our approval card. Mail goes only through the SmartBuddy connector."""
+
+    def test_smartbuddy_pod_TurnsOffConnectorsAndNousGuest(self, home):
+        _run(home)
+        _run(home)  # idempotent
+
+        config = _config(home)
+        assert config["tools"]["connectors"] == {"enabled": False}
+        assert config["nous"] == {"guest": False}
+
+    def test_smartbuddy_pod_HermesSeesThemOff(self, home):
+        _run(home)
+
+        probe = ("from tools.connectors.gateway.config import connectors_available\n"
+                 "from hermes_cli.anon_auth import guest_allowed\n"
+                 "print(connectors_available(), guest_allowed())\n")
+        out = subprocess.run([sys.executable, "-c", probe], text=True, capture_output=True, check=True,
+                             env={**os.environ, "HERMES_HOME": str(home)}).stdout.split()
+        assert out == ["False", "False"]
+
+    def test_smartbuddy_pod_KeepsOtherNousKeys(self, home):
+        (home / "config.yaml").write_text(yaml.safe_dump({"model": {}, "nous": {"region": "x"}}))
+
+        _run(home)
+
+        assert _config(home)["nous"] == {"region": "x", "guest": False}
+
+    def test_non_smartbuddy_pod_LeavesThemAlone(self, home):
+        _run(home, SMARTBUDDY_AGENT_ID=None)
+
+        config = _config(home)
+        assert "nous" not in config
+        assert "connectors" not in config.get("tools", {})
+
+
 class TestLongRunningNotice:
     def test_smartbuddy_pod_FirstNoticeAtThreeMinutes(self, home):
         _run(home)

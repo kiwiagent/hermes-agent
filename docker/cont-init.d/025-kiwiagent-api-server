@@ -214,6 +214,21 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
             tool_search["defer"] = wanted_defer
             dirty = True
 
+    # ---------- 4h) no Nous hosted connectors ----------
+    # 0.22's manage_connections mints an anonymous Nous account on first use
+    # and keeps the user's mail tokens with Nous; its Gmail send skips our
+    # approval card. Mail goes only through the SmartBuddy connector (4e).
+    tools_cfg = data.setdefault("tools", {})
+    if tools_cfg.get("connectors") != {"enabled": False}:
+        tools_cfg["connectors"] = {"enabled": False}
+        dirty = True
+    nous = data.get("nous")
+    if not isinstance(nous, dict):
+        nous = data["nous"] = {}
+    if nous.get("guest") is not False:
+        nous["guest"] = False
+        dirty = True
+
 # ---------- 5) realign cron jobs' model snapshot ----------
 # create_job() snapshots the default model; when the platform switches models
 # (HERMES_DEFAULT_MODEL), unpinned jobs then hit the drift guard and are
