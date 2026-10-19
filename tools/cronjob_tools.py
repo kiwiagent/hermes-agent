@@ -604,6 +604,27 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _list_row(job: Dict[str, Any]) -> Dict[str, Any]:
+    """One short row per job for action='list'.
+
+    A buddy lists before every change and the result stays in the chat
+    history, so the full record (22 fields, ~1,100 chars) made one list of
+    77 reminders ~85k chars. Details come from action='get'.
+    """
+    full = _format_job(job)
+    row = {key: full[key] for key in ("job_id", "name", "schedule", "next_run_at", "state")}
+    if full["skills"]:
+        row["skills"] = full["skills"]
+    if full["last_status"] and full["last_status"] != "ok":
+        row["last_status"] = full["last_status"]
+    return row
+
+
+def _matches_query(job: Dict[str, Any], query: str) -> bool:
+    needle = query.casefold()
+    return any(needle in str(job.get(field) or "").casefold() for field in ("id", "name", "prompt"))
+
+
 def _execute_job_now(job: Dict[str, Any]) -> Dict[str, Any]:
     """Execute a cron job immediately, outside the scheduler tick.
 
@@ -668,6 +689,8 @@ def cronjob(
     repeat: Optional[int] = None,
     deliver: Optional[str] = None,
     include_disabled: bool = False,
+    query: Optional[str] = None,
+    detailed: bool = False,
     skill: Optional[str] = None,
     skills: Optional[List[str]] = None,
     model: Optional[str] = None,
@@ -777,8 +800,13 @@ def cronjob(
             )
 
         if normalized == "list":
-            jobs = [_format_job(job) for job in list_jobs(include_disabled=include_disabled)]
-            return json.dumps({"success": True, "count": len(jobs), "jobs": jobs}, indent=2)
+            jobs = list_jobs(include_disabled=include_disabled)
+            if query and query.strip():
+                jobs = [job for job in jobs if _matches_query(job, query.strip())]
+            # detailed: the CLI's /cron list, a person reading it (not the model's tool).
+            rows = [_format_job(job) if detailed else _list_row(job) for job in jobs]
+            return json.dumps({"success": True, "count": len(rows), "jobs": rows}, ensure_ascii=False,
+                              separators=(",", ":"))
 
         if not job_id:
             return tool_error(f"job_id is required for action '{normalized}'", success=False)
@@ -809,6 +837,11 @@ def cronjob(
             )
         # Resolve to canonical ID (supports name-based lookup)
         job_id = job["id"]
+
+        if normalized == "get":
+            detail = _format_job(job)
+            detail["prompt"] = str(job.get("prompt") or "")
+            return json.dumps({"success": True, "job": detail}, ensure_ascii=False)
 
         if normalized == "remove":
             removed = remove_job(job_id)
@@ -975,10 +1008,11 @@ CRONJOB_SCHEMA = {
     "description": """Manage scheduled cron jobs with a single compressed tool.
 
 Use action='create' to schedule a new job from a prompt or one or more skills.
-Use action='list' to inspect jobs.
+Use action='list' to see jobs, one short line each; add query='<words>' to list only the jobs whose name or prompt contains them.
+Use action='get' with job_id for one job's full details (whole prompt, delivery, model…).
 Use action='update', 'pause', 'resume', 'remove', or 'run' to manage an existing job.
 
-To stop a job the user no longer wants: first action='list' to find the job_id, then action='remove' with that job_id. Never guess job IDs — always list first.
+To change or stop a job: find its job_id with action='list' and a query (e.g. query='ballet'), then act on that job_id. job_id also accepts the job's exact name. Never guess job IDs.
 
 Jobs run in a fresh session with no current-chat context, so prompts must be self-contained.
 If skills are provided on create, the future cron run loads those skills in order, then follows the prompt as the task instruction.
@@ -994,11 +1028,15 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
         "properties": {
             "action": {
                 "type": "string",
-                "description": "One of: create, list, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
+                "description": "One of: create, list, get, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
             },
             "job_id": {
                 "type": "string",
-                "description": "Required for update/pause/resume/remove/run"
+                "description": "Required for get/update/pause/resume/remove/run"
+            },
+            "query": {
+                "type": "string",
+                "description": "For list: only jobs whose name or prompt contains this text (case-insensitive)."
             },
             "prompt": {
                 "type": "string",
@@ -1132,6 +1170,7 @@ registry.register(
         repeat=args.get("repeat"),
         deliver=args.get("deliver"),
         include_disabled=args.get("include_disabled", True),
+        query=args.get("query"),
         skill=args.get("skill"),
         skills=args.get("skills"),
         model=_mo[1],

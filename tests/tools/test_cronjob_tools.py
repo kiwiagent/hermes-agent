@@ -283,8 +283,86 @@ class TestUnifiedCronjobTool:
 
         assert listing["success"] is True
         assert listing["jobs"][0]["name"] == "abc123deadbe"
-        assert listing["jobs"][0]["prompt_preview"] == ""
         assert listing["jobs"][0]["schedule"] == "every 60m"
+        detail = json.loads(cronjob(action="get", job_id="abc123deadbe"))
+        assert detail["job"]["prompt_preview"] == ""
+
+    # A buddy with dozens of reminders lists them before every change; each
+    # listing stays in the chat history, so it must be small.
+    def test_list_is_compact_one_line_per_job(self):
+        for i in range(40):
+            cronjob(action="create", prompt=f"Remind the user to pick up Shishi from ballet, week {i}. " * 3,
+                    schedule="every 1h", name=f"周二接·诗诗（芭蕾）{i}")
+
+        raw = cronjob(action="list")
+        listing = json.loads(raw)
+
+        assert listing["count"] == 40
+        assert "\n" not in raw  # no indent
+        assert len(raw) < 40 * 200
+        row = listing["jobs"][0]
+        assert set(row) <= {"job_id", "name", "schedule", "next_run_at", "state", "skills", "last_status"}
+        assert "skills" not in row  # left out when empty
+        assert "prompt_preview" not in row and "model" not in row
+
+    def test_list_detailed_keeps_full_records_for_the_cli(self):
+        cronjob(action="create", prompt="Check server status", schedule="every 1h", name="Server Check")
+
+        row = json.loads(cronjob(action="list", detailed=True))["jobs"][0]
+
+        assert row["prompt_preview"] == "Check server status"
+        assert row["repeat"]
+
+    def test_list_shows_failed_last_run(self):
+        from cron.jobs import load_jobs, save_jobs
+
+        created = json.loads(cronjob(action="create", prompt="Check", schedule="every 1h", name="Check"))
+        jobs = load_jobs()
+        jobs[0]["last_status"] = "error"
+        save_jobs(jobs)
+
+        row = json.loads(cronjob(action="list"))["jobs"][0]
+
+        assert row["job_id"] == created["job_id"]
+        assert row["last_status"] == "error"
+
+    def test_list_query_filters_by_name_or_prompt(self):
+        cronjob(action="create", prompt="Pick up Shishi from ballet", schedule="every 1h", name="周二接·诗诗（芭蕾）")
+        cronjob(action="create", prompt="Bins out tonight", schedule="every 2h", name="倒垃圾")
+        cronjob(action="create", prompt="Swimming lesson for Shishi", schedule="every 3h", name="周四游泳")
+
+        by_name = json.loads(cronjob(action="list", query="诗诗"))
+        by_prompt = json.loads(cronjob(action="list", query="shishi"))
+        none = json.loads(cronjob(action="list", query="dentist"))
+
+        assert [j["name"] for j in by_name["jobs"]] == ["周二接·诗诗（芭蕾）"]
+        assert sorted(j["name"] for j in by_prompt["jobs"]) == ["周二接·诗诗（芭蕾）", "周四游泳"]
+        assert none["count"] == 0 and none["jobs"] == []
+
+    def test_get_returns_full_job_with_whole_prompt(self):
+        long_prompt = "Remind the user to bring the ballet shoes and a water bottle. " * 5
+        created = json.loads(cronjob(action="create", prompt=long_prompt, schedule="every 1h", name="芭蕾"))
+
+        by_id = json.loads(cronjob(action="get", job_id=created["job_id"]))
+        by_name = json.loads(cronjob(action="get", job_id="芭蕾"))
+
+        assert by_id["success"] is True
+        assert by_id["job"]["job_id"] == created["job_id"]
+        assert by_id["job"]["prompt"] == long_prompt
+        assert by_id["job"]["deliver"]
+        assert by_name["job"]["job_id"] == created["job_id"]
+
+    def test_get_unknown_job_fails(self):
+        result = json.loads(cronjob(action="get", job_id="nope"))
+
+        assert result["success"] is False
+
+    def test_schema_no_longer_says_always_list_first(self):
+        from tools.cronjob_tools import CRONJOB_SCHEMA
+
+        assert "always list first" not in CRONJOB_SCHEMA["description"]
+        assert "query" in CRONJOB_SCHEMA["parameters"]["properties"]
+        assert "get" in CRONJOB_SCHEMA["parameters"]["properties"]["action"]["description"]
 
     def test_pause_and_resume(self):
         created = json.loads(cronjob(action="create", prompt="Check", schedule="every 1h"))
@@ -425,7 +503,7 @@ class TestUnifiedCronjobTool:
         assert result["skill"] == "blogwatcher"
 
         listing = json.loads(cronjob(action="list"))
-        assert listing["jobs"][0]["skill"] == "blogwatcher"
+        assert listing["jobs"][0]["skills"] == ["blogwatcher"]
 
     def test_create_multi_skill_job(self):
         result = json.loads(

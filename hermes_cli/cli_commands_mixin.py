@@ -1276,7 +1276,7 @@ class CLICommandsMixin:
             print("    /cron run <job_id>")
             print("    /cron remove <job_id>")
             print()
-            result = _cron_api(action="list")
+            result = _cron_api(action="list", detailed=True)
             jobs = result.get("jobs", []) if result.get("success") else []
             if jobs:
                 print("  Current Jobs:")
@@ -1301,7 +1301,7 @@ class CLICommandsMixin:
             return
 
         if subcommand == "list":
-            result = _cron_api(action="list", include_disabled=opts["all"])
+            result = _cron_api(action="list", include_disabled=opts["all"], detailed=True)
             jobs = result.get("jobs", []) if result.get("success") else []
             if not jobs:
                 print("(._.) No scheduled jobs.")

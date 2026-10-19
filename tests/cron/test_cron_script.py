@@ -426,7 +426,10 @@ class TestCronjobToolScript:
         list_result = json.loads(cronjob(action="list"))
         assert list_result["success"] is True
         assert len(list_result["jobs"]) == 1
-        assert list_result["jobs"][0]["script"] == "data_collector.py"
+        # The compact list leaves details to action='get'.
+        job_id = list_result["jobs"][0]["job_id"]
+        detail = json.loads(cronjob(action="get", job_id=job_id))
+        assert detail["job"]["script"] == "data_collector.py"
 
 
 class TestScriptPathContainment:
