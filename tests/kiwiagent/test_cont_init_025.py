@@ -139,6 +139,21 @@ class TestSessionsAndReview:
         assert enabled.count("hermes-session-reset-policy") == 1
         assert "platforms/smartbuddy" in enabled
 
+    def test_smartbuddy_pod_ContextLength128k(self, home):
+        # 0.22 falls back to 256k (catalog: 1M for deepseek-flash); keep 0.18's compression point.
+        _run(home)
+
+        assert _config(home)["model"]["context_length"] == 128000
+
+    def test_smartbuddy_pod_CronToolAlwaysLoaded_RestStayOnDemand(self, home):
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+        _run(home)
+        _run(home)  # idempotent
+
+        defer = _config(home)["tools"]["tool_search"]["defer"]
+        assert "cronjob_manage" not in defer
+        assert set(defer) == set(DEFAULT_CONFIG["tools"]["tool_search"]["defer"]) - {"cronjob_manage"}
+
     def test_reset_plugin_IsBundledInTheImageTree(self):
         plugin = Path(__file__).resolve().parents[2] / "plugins" / "hermes-session-reset-policy"
         assert (plugin / "plugin.yaml").is_file() and (plugin / "__init__.py").is_file()
