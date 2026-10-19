@@ -22,11 +22,11 @@ def gw_session(monkeypatch):
     monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
     monkeypatch.setattr(A, "_YOLO_MODE_FROZEN", False)
     # SmartBuddy runs smart mode; the aux model would happily approve these.
-    monkeypatch.setattr(A, "_get_approval_mode", lambda: "smart")
-    monkeypatch.setattr(A, "_smart_approve", lambda c, d: "approve")
+    monkeypatch.setattr(A.approval_context, "_get_approval_mode", lambda: "smart")
+    monkeypatch.setattr(A, "_smart_verdict", lambda *a, **k: "approve")
     monkeypatch.setattr(A, "_outbound_confirm_enabled", lambda: True)
     session_key = "outbound-test-session"
-    token = A.set_current_session_key(session_key)
+    token = A.approval_context.set_current_session_key(session_key)
     with A._lock:
         A._gateway_queues.pop(session_key, None)
         A._gateway_notify_cbs.pop(session_key, None)
@@ -34,7 +34,7 @@ def gw_session(monkeypatch):
     try:
         yield session_key
     finally:
-        A.reset_current_session_key(token)
+        A.approval_context.reset_current_session_key(token)
         with A._lock:
             A._gateway_queues.pop(session_key, None)
             A._gateway_notify_cbs.pop(session_key, None)
@@ -112,7 +112,7 @@ class TestTerminal:
     def test_cron_never_sends_and_asks_for_a_draft(self, gw_session, monkeypatch):
         monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
         monkeypatch.setenv("HERMES_CRON_SESSION", "1")
-        monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "approve")
+        monkeypatch.setattr(A.approval_context, "_get_cron_approval_mode", lambda: "approve")
 
         res = A.check_all_command_guards(POST_CMD, "local")
 
@@ -162,7 +162,7 @@ class TestExecuteCode:
     def test_cron_never_sends_even_when_cron_mode_approve(self, gw_session, monkeypatch):
         monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
         monkeypatch.setenv("HERMES_CRON_SESSION", "1")
-        monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "approve")
+        monkeypatch.setattr(A.approval_context, "_get_cron_approval_mode", lambda: "approve")
 
         res = A.check_execute_code_guard(EMAIL_CODE, "local")
 
@@ -322,7 +322,7 @@ class TestHardRule:
                              "outbound:http:hooks.slack.com", "outbound:http:gmail.googleapis.com"})
         monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
         monkeypatch.setenv("HERMES_CRON_SESSION", "1")
-        monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "approve")
+        monkeypatch.setattr(A.approval_context, "_get_cron_approval_mode", lambda: "approve")
 
         res = A.check_all_command_guards(command, "local")
 
@@ -352,7 +352,7 @@ class TestCronAllowedHost:
     def cron(self, gw_session, monkeypatch):
         monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
         monkeypatch.setenv("HERMES_CRON_SESSION", "1")
-        monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "deny")
+        monkeypatch.setattr(A.approval_context, "_get_cron_approval_mode", lambda: "deny")
 
     def test_allowed_host_write_runs(self, cron, allowlist):
         allowlist[0].add("outbound:http:api.notion.com")
@@ -406,7 +406,7 @@ class TestAllowedHostNeedsLiteralTargets:
         code, auto = LITERAL_CASES[case]
         allowlist[0].add(NOTION_ALLOWED)
         # isolate the outbound decision from the generic execute_code prompt
-        monkeypatch.setattr(A, "_smart_approve", lambda c, d: "approve")
+        monkeypatch.setattr(A, "_smart_verdict", lambda *a, **k: "approve")
         seen = _answer(gw_session, "deny")
 
         res = A.check_execute_code_guard(code, "local")
@@ -429,7 +429,7 @@ class TestAllowedHostNeedsLiteralTargets:
         command = _as_command(tmp_path, monkeypatch, code)
         monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
         monkeypatch.setenv("HERMES_CRON_SESSION", "1")
-        monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "deny")
+        monkeypatch.setattr(A.approval_context, "_get_cron_approval_mode", lambda: "deny")
 
         res = A.check_all_command_guards(command, "local")
 
@@ -462,14 +462,21 @@ class TestListPermanentApprovals:
 
 
 class TestRevokePermanent:
-    def test_removes_from_memory_and_config(self, allowlist):
-        perm, saved = allowlist
+    def test_removes_from_memory_and_config(self, allowlist, monkeypatch):
+        # 0.22's save_permanent_allowlist only adds (the file wins), so revoke
+        # edits command_allowlist in config.yaml itself.
+        import hermes_cli.config as config_mod
+        perm, _ = allowlist
         perm.update({"outbound:http:api.notion.com", "recursive delete"})
+        config = {"command_allowlist": ["outbound:http:api.notion.com", "recursive delete"]}
+        written = []
+        monkeypatch.setattr(config_mod, "load_config", lambda: dict(config))
+        monkeypatch.setattr(config_mod, "save_config", lambda c: written.append(c))
 
         assert A.revoke_permanent("outbound:http:api.notion.com") is True
 
         assert perm == {"recursive delete"}
-        assert saved == [{"recursive delete"}]
+        assert written[-1]["command_allowlist"] == ["recursive delete"]
 
     def test_unknown_key_changes_nothing(self, allowlist):
         perm, saved = allowlist
@@ -513,7 +520,7 @@ class TestExemptionsNeedLiteralTargets:
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
         monkeypatch.setenv("HERMES_CRON_SESSION", "1")
-        monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "approve")
+        monkeypatch.setattr(A.approval_context, "_get_cron_approval_mode", lambda: "approve")
 
         res = A.check_all_command_guards(f"node {name}" if name.endswith(".mjs") else f"python3 {name}", "local")
 
@@ -553,7 +560,7 @@ class TestHostKeyThroughBaseConstant:
         command = _as_command(tmp_path, monkeypatch, NOTION_BASE_CODE)
         monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
         monkeypatch.setenv("HERMES_CRON_SESSION", "1")
-        monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "deny")
+        monkeypatch.setattr(A.approval_context, "_get_cron_approval_mode", lambda: "deny")
 
         assert A.check_all_command_guards(command, "local")["approved"] is True
 

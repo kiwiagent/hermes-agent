@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 SCRIPT = Path(__file__).resolve().parents[2] / "docker" / "cont-init.d" / "025-kiwiagent-api-server"
 
@@ -129,6 +129,19 @@ class TestSessionsAndReview:
         _run(home)
 
         assert _config(home)["session_reset"] == {"mode": "daily", "at_hour": 4, "notify": False}
+
+    def test_smartbuddy_pod_EnablesTheResetPlugin_KeepsSmartBuddy(self, home):
+        # 0.22 core ignores session_reset; the bundled plugin applies it.
+        _run(home)
+        _run(home)  # idempotent: no duplicates
+
+        enabled = _config(home)["plugins"]["enabled"]
+        assert enabled.count("hermes-session-reset-policy") == 1
+        assert "platforms/smartbuddy" in enabled
+
+    def test_reset_plugin_IsBundledInTheImageTree(self):
+        plugin = Path(__file__).resolve().parents[2] / "plugins" / "hermes-session-reset-policy"
+        assert (plugin / "plugin.yaml").is_file() and (plugin / "__init__.py").is_file()
 
     def test_smartbuddy_pod_CompressionKeepsLast10(self, home):
         (home / "config.yaml").write_text(yaml.safe_dump({"model": {}, "compression": {"threshold": 0.5}}))
