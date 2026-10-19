@@ -100,6 +100,11 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
     if "platforms/smartbuddy" not in enabled:
         enabled.append("platforms/smartbuddy")
         dirty = True
+    # 0.22 core no longer applies session_reset (the 4am fresh session below);
+    # the bundled hermes-session-reset-policy plugin does.
+    if "hermes-session-reset-policy" not in enabled:
+        enabled.append("hermes-session-reset-policy")
+        dirty = True
     tts = data.setdefault("tts", {})
     if tts.get("provider") != "smartbuddy":
         tts["provider"] = "smartbuddy"
