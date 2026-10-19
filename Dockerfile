@@ -285,11 +285,15 @@ RUN touch ./README.md
 # Do not leave the cache at its default: HERMES_HOME is not set yet in this
 # stage, so the default is /root/.hermes/cache/uv, which nothing reads. A plugin
 # install then runs with an empty cache and builds python-olm from source.
+# kiwiagent: edge-tts baked in — the SmartBuddy voice replies need it and
+# runtime installs are off (HERMES_DISABLE_LAZY_INSTALLS; 0.22 retired
+# tools.lazy_deps.ensure).
 RUN python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3 \
     --cache /opt/hermes/uv-cache \
     --out /opt/hermes/.venv --no-install-project --sealed --record-selection \
     --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock \
-    --extra azure-identity --extra matrix --extra google-chat
+    --extra azure-identity --extra matrix --extra google-chat \
+    --extra edge-tts
 
 # Icons render on the runtime environment: Pillow and resvg-py are core
 # dependencies. A stage of its own so the frontend stage keeps building its
