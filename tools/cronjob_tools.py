@@ -717,15 +717,50 @@ def _action_create(a: dict[str, Any]) -> str:
     return _dumps(_with_guidance(_result, job, deliver))
 
 
+def _list_row(job: dict[str, Any]) -> dict[str, Any]:
+    """kiwiagent: one short row per job for action='list'.
+
+    A buddy lists before every change and the result stays in the chat
+    history, so the full record (~1,000 chars, 22+ fields) made one list of
+    77 reminders ~77k chars. Details come from action='get'.
+    """
+    full = _format_job(job)
+    row = {key: full[key] for key in ("job_id", "name", "schedule", "next_run_at", "state")}
+    if full["skills"]:
+        row["skills"] = full["skills"]
+    if full["last_status"] and full["last_status"] != "ok":
+        row["last_status"] = full["last_status"]
+    return row
+
+
+def _matches_query(job: dict[str, Any], query: str) -> bool:
+    needle = query.casefold()
+    return any(needle in str(job.get(field) or "").casefold() for field in ("id", "name", "prompt"))
+
+
 def _action_list(a: dict[str, Any]) -> str:
-    jobs = [_format_job(job) for job in list_jobs(include_disabled=a["include_disabled"])]
-    _result = {"success": True, "count": len(jobs), "jobs": jobs}
+    jobs = list_jobs(include_disabled=a["include_disabled"])
+    query = (a.get("query") or "").strip()
+    if query:
+        jobs = [job for job in jobs if _matches_query(job, query)]
+    # detailed: the CLI's /cron list, a person reading it (not the model's tool).
+    rows = [_format_job(job) if a.get("detailed") else _list_row(job) for job in jobs]
+    _result = {"success": True, "count": len(rows), "jobs": rows}
     # Same inert-job class as create; an empty list has nothing inert.
-    if jobs:
+    if rows:
         # Same silent-inert-job class as create (#87033): an agent inspecting existing jobs in a
         # gateway-less environment must learn they are not firing, not just see a clean list.
         _result.update(_gateway_liveness_notice(plural=True))
-    return _dumps(_result)
+    if a.get("detailed"):
+        return _dumps(_result)
+    return json.dumps(_result, ensure_ascii=False, separators=(",", ":"))
+
+
+def _action_get(job: dict[str, Any], a: dict[str, Any]) -> str:
+    """kiwiagent: one job's full record, with the whole prompt."""
+    detail = _format_job(job)
+    detail["prompt"] = str(job.get("prompt") or "")
+    return json.dumps({"success": True, "job": detail}, ensure_ascii=False)
 
 
 def _action_remove(job: dict[str, Any], a: dict[str, Any]) -> str:
@@ -956,6 +991,7 @@ def _action_update(job: dict[str, Any], a: dict[str, Any]) -> str:
 
 _JOBLESS_ACTIONS = {"create": _action_create, "list": _action_list}
 _JOB_ACTIONS = {
+    "get": _action_get,
     "remove": _action_remove, "update": _action_update,
     "run": _action_run, "run_now": _action_run, "trigger": _action_run,
     "pause": lambda job, a: _job_state_result(pause_job(job["id"], reason=a["reason"])),
@@ -992,6 +1028,8 @@ def cronjob(
     repeat: Optional[int] = None,
     deliver: Optional[str] = None,
     include_disabled: bool = False,
+    query: Optional[str] = None,
+    detailed: bool = False,
     skill: Optional[str] = None,
     skills: Optional[list[str]] = None,
     model: Optional[str] = None,
@@ -1055,7 +1093,7 @@ def _cronjob_schema_overrides() -> dict:
 
 CRONJOB_SCHEMA = {
     "name": "cronjob_manage",
-    "description": """Manage scheduled cron jobs: action='create' schedules a job from a prompt and/or skills; 'list' inspects jobs; 'update'/'pause'/'resume'/'remove' manage one by job_id (always list first — never guess job IDs); 'run' fires a job immediately in the BACKGROUND (returns a handle at once, outcome re-enters the conversation when done — do not wait or poll; optional 'prompt' adds transient context for that fire only).
+    "description": """Manage scheduled cron jobs: action='create' schedules a job from a prompt and/or skills; 'list' shows jobs one short line each (add query='<words>' for only the jobs whose name or prompt contains them); 'get' shows one job's full details; 'update'/'pause'/'resume'/'remove' manage one by job_id — find it with list + query (job_id also takes the exact name), never guess job IDs; 'run' fires a job immediately in the BACKGROUND (returns a handle at once, outcome re-enters the conversation when done — do not wait or poll; optional 'prompt' adds transient context for that fire only).
 
 Jobs run on the main agent model (whatever `hermes model` is set to when they fire) unless pinned.
 
@@ -1067,11 +1105,15 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
             "paused_reason": {"type": "string", "description": "Create only: auditable reason; requires paused=true."},
             "action": {
                 "type": "string",
-                "description": "One of: create, list, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
+                "description": "One of: create, list, get, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
             },
             "job_id": {
                 "type": "string",
-                "description": "Required for update/pause/resume/remove/run."
+                "description": "Required for get/update/pause/resume/remove/run."
+            },
+            "query": {
+                "type": "string",
+                "description": "For list: only jobs whose name or prompt contains this text (case-insensitive)."
             },
             "pinned": {
                 "type": "boolean",
@@ -1170,7 +1212,7 @@ def check_cronjob_requirements() -> bool:
 _HANDLER_FORWARDED_ARGS = (
     "job_id", "prompt", "schedule", "name", "repeat", "deliver", "failure_deliver", "skill", "skills", "reason",
     "script", "context_from", "continuity", "enabled_toolsets", "workdir", "no_agent", "attach_to_session",
-    "paused_reason", "pinned")
+    "paused_reason", "pinned", "query")
 
 
 def _cronjob_handler(args, **kw):

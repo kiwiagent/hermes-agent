@@ -1381,7 +1381,7 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         _pr("", "+" + "-" * 68 + "+", "|" + _t("cron.overview_title").center(68) + "|",
             "+" + "-" * 68 + "+", "", f"  {_t('cron.overview_commands')}",
             *_lines(_t("cron.overview_usage"), pad="    "), "")
-        result = _cron_api(action="list")
+        result = _cron_api(action="list", detailed=True)
         jobs = result.get("jobs", []) if result.get("success") else []
         if jobs:
             from hermes_cli.cron import _next_run_row
@@ -1401,7 +1401,7 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         print()
 
     def _cron_list(self, subcommand: str, opts: dict) -> None:
-        result = _cron_api(action="list", include_disabled=opts["all"])
+        result = _cron_api(action="list", include_disabled=opts["all"], detailed=True)
         jobs = result.get("jobs", []) if result.get("success") else []
         if not jobs:
             return print(_t("cron.no_jobs"))

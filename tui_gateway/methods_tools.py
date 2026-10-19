@@ -1395,7 +1395,8 @@ def _(rid, params: dict) -> dict:
     if action == "list":
         # Paused jobs are excluded by default (reads as deletion in a toggle UI) — forward the flag.
         include_disabled = is_truthy_value(params.get("include_disabled", False))
-        result = json.loads(cronjob(action="list", include_disabled=include_disabled))
+        # kiwiagent: a UI, not the model — the full records (the tool list is compact).
+        result = json.loads(cronjob(action="list", include_disabled=include_disabled, detailed=True))
         # ``scoped`` proves the profile scope was honored; older gateways omit it and clients
         # keep the safe [bot:<name>] filter.
         if profile := _str_arg(params, "profile"):
