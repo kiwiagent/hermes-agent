@@ -8,6 +8,7 @@ external writes) is not run, and the user gets a plain-language notice.
 import pytest
 
 import cron.scheduler as s
+import cron.scheduler_script as ss
 from tools import approval as A
 
 
@@ -27,7 +28,7 @@ def test_outbound_script_not_run(scripts_dir, monkeypatch):
         f"open({str(marker)!r}, 'w').write('sent')\n"
     )
 
-    ok, out = s._run_job_script("weekly_report.py")
+    ok, out = ss._run_job_script("weekly_report.py")
 
     assert ok is False
     assert out.startswith("Outbound blocked:")
@@ -38,7 +39,7 @@ def test_read_only_script_runs(scripts_dir, monkeypatch):
     monkeypatch.setattr(A, "_outbound_confirm_enabled", lambda: True)
     (scripts_dir / "check.py").write_text("print('3 new emails')\n")
 
-    ok, out = s._run_job_script("check.py")
+    ok, out = ss._run_job_script("check.py")
 
     assert ok is True and "3 new emails" in out
 
@@ -47,7 +48,7 @@ def test_flag_off_runs_as_before(scripts_dir, monkeypatch):
     monkeypatch.setattr(A, "_outbound_confirm_enabled", lambda: False)
     (scripts_dir / "send.py").write_text("import smtplib\nprint('done')\n")
 
-    ok, out = s._run_job_script("send.py")
+    ok, out = ss._run_job_script("send.py")
 
     assert ok is True and "done" in out
 

@@ -28,11 +28,11 @@ def _patch_failing_run(monkeypatch, *, friendly, error="RuntimeError: HTTP 400: 
     paused = []
 
     monkeypatch.setattr(s, "load_config", lambda: {"cron": {"friendly_failures": friendly}})
-    monkeypatch.setattr(s, "run_job", lambda job, *, defer_agent_teardown=None: (False, "out", "", error))
+    monkeypatch.setattr(s, "run_job", lambda job, **kw: (False, "out", "", error))
     monkeypatch.setattr(s, "save_job_output", lambda jid, out: "/tmp/out.txt")
     monkeypatch.setattr(s, "_deliver_result",
-                        lambda job, content, adapters=None, loop=None: delivered.append(content))
-    monkeypatch.setattr(s, "mark_job_run", lambda jid, ok, err=None, delivery_error=None: None)
+                        lambda job, content, adapters=None, loop=None, **kw: delivered.append(content))
+    monkeypatch.setattr(s, "mark_job_run", lambda jid, ok, err=None, **kw: True)
     monkeypatch.setattr(s, "pause_job", lambda jid, reason=None: paused.append((jid, reason)))
     return delivered, paused
 
@@ -119,7 +119,7 @@ class TestFriendlyDeliveryPolicy:
     def test_run_one_job_FriendlySuccess_DeliversResponseUnchanged(self, monkeypatch):
         delivered, _ = _patch_failing_run(monkeypatch, friendly=True)
         monkeypatch.setattr(s, "run_job",
-                            lambda job, *, defer_agent_teardown=None: (True, "out", "Ballet at 5pm!", None))
+                            lambda job, **kw: (True, "out", "Ballet at 5pm!", None))
 
         s.run_one_job(_job(streak=2))
 

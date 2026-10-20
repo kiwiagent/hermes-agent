@@ -17,20 +17,24 @@ from pathlib import Path
 
 import pytest
 
-from tools.lazy_deps import LAZY_DEPS
-
 PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
 
 
 def _pinned_spec() -> str:
-    (spec,) = LAZY_DEPS["tts.edge"]
-    return spec
-
-
-def test_edge_tts_pin_MatchesPyprojectExtra():
-    match = re.search(r'^edge-tts = \["(edge-tts==[^"]+)"\]$', PYPROJECT.read_text(), re.M)
+    # 0.22: the pyproject extra is the single pin (tools.lazy_deps is retired).
+    match = re.search(r'^edge-tts = \["(edge-tts==[^"]+)"\]', PYPROJECT.read_text(), re.M)
     assert match, "edge-tts extra not found in pyproject.toml"
-    assert match.group(1) == _pinned_spec()
+    return match.group(1)
+
+
+def test_edge_tts_pin_IsTheWorkingVersion():
+    assert _pinned_spec() == "edge-tts==7.3.1"
+
+
+def test_edge_tts_BakedIntoTheImage():
+    # Runtime installs are off in the image, so the voice replies need it there.
+    dockerfile = (PYPROJECT.parent / "Dockerfile").read_text()
+    assert "--extra edge-tts" in dockerfile
 
 
 @pytest.mark.integration

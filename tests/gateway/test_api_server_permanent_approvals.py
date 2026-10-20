@@ -60,15 +60,21 @@ class TestGet:
 
 class TestDelete:
     @pytest.mark.asyncio
-    async def test_removes_key_from_memory_and_config(self, allowlist):
-        perm, saved = allowlist
+    async def test_removes_key_from_memory_and_config(self, allowlist, monkeypatch):
+        # Revoke edits config.yaml itself (0.22's save_permanent_allowlist only adds).
+        import hermes_cli.config as config_mod
+        perm, _ = allowlist
+        config = {"command_allowlist": sorted(perm)}
+        written = []
+        monkeypatch.setattr(config_mod, "load_config", lambda: dict(config))
+        monkeypatch.setattr(config_mod, "save_config", lambda c: written.append(c))
         key = quote("outbound:http:api.notion.com", safe="")
         async with TestClient(TestServer(_create_app(_make_adapter()))) as cli:
             resp = await cli.delete(f"/api/approvals/permanent?key={key}")
             assert resp.status == 200
             assert await resp.json() == {"removed": True}
         assert "outbound:http:api.notion.com" not in perm
-        assert saved and "outbound:http:api.notion.com" not in saved[-1]
+        assert written and "outbound:http:api.notion.com" not in written[-1]["command_allowlist"]
 
     @pytest.mark.asyncio
     async def test_key_with_space_is_url_decoded(self, allowlist):

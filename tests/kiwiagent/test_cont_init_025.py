@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 SCRIPT = Path(__file__).resolve().parents[2] / "docker" / "cont-init.d" / "025-kiwiagent-api-server"
 
@@ -130,6 +130,34 @@ class TestSessionsAndReview:
 
         assert _config(home)["session_reset"] == {"mode": "daily", "at_hour": 4, "notify": False}
 
+    def test_smartbuddy_pod_EnablesTheResetPlugin_KeepsSmartBuddy(self, home):
+        # 0.22 core ignores session_reset; the bundled plugin applies it.
+        _run(home)
+        _run(home)  # idempotent: no duplicates
+
+        enabled = _config(home)["plugins"]["enabled"]
+        assert enabled.count("hermes-session-reset-policy") == 1
+        assert "platforms/smartbuddy" in enabled
+
+    def test_smartbuddy_pod_ContextLength128k(self, home):
+        # 0.22 falls back to 256k (catalog: 1M for deepseek-flash); keep 0.18's compression point.
+        _run(home)
+
+        assert _config(home)["model"]["context_length"] == 128000
+
+    def test_smartbuddy_pod_CronToolAlwaysLoaded_RestStayOnDemand(self, home):
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+        _run(home)
+        _run(home)  # idempotent
+
+        defer = _config(home)["tools"]["tool_search"]["defer"]
+        assert "cronjob_manage" not in defer
+        assert set(defer) == set(DEFAULT_CONFIG["tools"]["tool_search"]["defer"]) - {"cronjob_manage"}
+
+    def test_reset_plugin_IsBundledInTheImageTree(self):
+        plugin = Path(__file__).resolve().parents[2] / "plugins" / "hermes-session-reset-policy"
+        assert (plugin / "plugin.yaml").is_file() and (plugin / "__init__.py").is_file()
+
     def test_smartbuddy_pod_CompressionKeepsLast10(self, home):
         (home / "config.yaml").write_text(yaml.safe_dump({"model": {}, "compression": {"threshold": 0.5}}))
 
@@ -151,6 +179,44 @@ class TestSessionsAndReview:
         assert "session_reset" not in config
         assert "compression" not in config
         assert "creation_nudge_interval" not in config.get("skills", {})
+
+
+class TestNoNousHostedConnectors:
+    """0.22's hosted connectors (manage_connections) mint an anonymous Nous
+    account and keep the user's mail tokens with Nous; their Gmail send skips
+    our approval card. Mail goes only through the SmartBuddy connector."""
+
+    def test_smartbuddy_pod_TurnsOffConnectorsAndNousGuest(self, home):
+        _run(home)
+        _run(home)  # idempotent
+
+        config = _config(home)
+        assert config["tools"]["connectors"] == {"enabled": False}
+        assert config["nous"] == {"guest": False}
+
+    def test_smartbuddy_pod_HermesSeesThemOff(self, home):
+        _run(home)
+
+        probe = ("from tools.connectors.gateway.config import connectors_available\n"
+                 "from hermes_cli.anon_auth import guest_allowed\n"
+                 "print(connectors_available(), guest_allowed())\n")
+        out = subprocess.run([sys.executable, "-c", probe], text=True, capture_output=True, check=True,
+                             env={**os.environ, "HERMES_HOME": str(home)}).stdout.split()
+        assert out == ["False", "False"]
+
+    def test_smartbuddy_pod_KeepsOtherNousKeys(self, home):
+        (home / "config.yaml").write_text(yaml.safe_dump({"model": {}, "nous": {"region": "x"}}))
+
+        _run(home)
+
+        assert _config(home)["nous"] == {"region": "x", "guest": False}
+
+    def test_non_smartbuddy_pod_LeavesThemAlone(self, home):
+        _run(home, SMARTBUDDY_AGENT_ID=None)
+
+        config = _config(home)
+        assert "nous" not in config
+        assert "connectors" not in config.get("tools", {})
 
 
 class TestLongRunningNotice:

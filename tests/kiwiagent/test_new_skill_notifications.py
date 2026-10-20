@@ -97,10 +97,22 @@ def test_format_notice_NewSkillsMode_NoOperatorPrefix():
     assert "Self-improvement review" not in notice
 
 
-def test_format_notice_DefaultMode_KeepsUpstreamFormat():
-    notice = format_background_review_notice(["Memory updated", "Skill created."], "on")
+def test_format_notice_DefaultMode_LeftToUpstream():
+    # None = _publish_review_summary keeps hermes' own (translated) summary line.
+    assert format_background_review_notice(["Memory updated", "Skill created."], "on") is None
 
-    assert notice == "💾 Self-improvement review: Memory updated · Skill created."
+
+def test_publish_NewSkillsMode_SendsPlainLinesWithoutPrefix():
+    from types import SimpleNamespace
+    from agent.background_review import _publish_review_summary
+    sent, printed = [], []
+    agent = SimpleNamespace(memory_notifications="new_skills", _safe_print=printed.append,
+                            background_review_callback=sent.append)
+
+    _publish_review_summary(agent, ["🧠 I learned a new skill: x. I'll use it automatically next time."])
+
+    assert sent == ["🧠 I learned a new skill: x. I'll use it automatically next time."]
+    assert "Self-improvement" not in printed[0]
 
 
 def test_on_mode_Unchanged_StillReportsPatches():

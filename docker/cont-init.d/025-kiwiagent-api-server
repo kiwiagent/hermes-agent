@@ -36,7 +36,11 @@ if [ ! -f "$CFG" ]; then
 fi
 
 exec s6-setuidgid hermes /opt/hermes/.venv/bin/python - <<'PY'
-import os, sys, yaml, pathlib
+import os, sys, pathlib
+# 0.22 ships ruamel behind hermes_yaml, not PyYAML; /opt/hermes isn't on the
+# path of this stdin script.
+sys.path.insert(0, "/opt/hermes")
+import hermes_yaml as yaml
 
 cfg_path = pathlib.Path(os.environ.get("HERMES_HOME", "/opt/data")) / "config.yaml"
 data = yaml.safe_load(cfg_path.read_text()) or {}
@@ -95,6 +99,11 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
         plugins["enabled"] = enabled
     if "platforms/smartbuddy" not in enabled:
         enabled.append("platforms/smartbuddy")
+        dirty = True
+    # 0.22 core no longer applies session_reset (the 4am fresh session below);
+    # the bundled hermes-session-reset-policy plugin does.
+    if "hermes-session-reset-policy" not in enabled:
+        enabled.append("hermes-session-reset-policy")
         dirty = True
     tts = data.setdefault("tts", {})
     if tts.get("provider") != "smartbuddy":
@@ -179,6 +188,45 @@ if os.environ.get("SMARTBUDDY_AGENT_ID"):
         dirty = True
     if skills.get("creation_nudge_interval") != 30:
         skills["creation_nudge_interval"] = 30
+        dirty = True
+
+    # ---------- 4g) hermes 0.22: same compression point, reminders always loaded ----------
+    # 0.22 can't read the context length from LiteLLM and falls back to 256k
+    # (its catalog says 1M for deepseek-flash); 0.18 used 128k. Compression is
+    # set off that number, so sessions would grow past twice today's size
+    # before compressing. Keep 128k until measured otherwise.
+    model_cfg = data.setdefault("model", {})
+    if model_cfg.get("context_length") != 128000:
+        model_cfg["context_length"] = 128000
+        dirty = True
+    # 0.22 loads the cron tool on demand (tool_search): every reminder change
+    # cost an extra model call to look the tool up. Keep hermes' own default
+    # list minus cronjob_manage (an explicit list replaces the default).
+    try:
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+        default_defer = list(DEFAULT_CONFIG["tools"]["tool_search"]["defer"])
+    except Exception:
+        default_defer = None
+    if default_defer is not None:
+        wanted_defer = [n for n in default_defer if n != "cronjob_manage"]
+        tool_search = data.setdefault("tools", {}).setdefault("tool_search", {})
+        if tool_search.get("defer") != wanted_defer:
+            tool_search["defer"] = wanted_defer
+            dirty = True
+
+    # ---------- 4h) no Nous hosted connectors ----------
+    # 0.22's manage_connections mints an anonymous Nous account on first use
+    # and keeps the user's mail tokens with Nous; its Gmail send skips our
+    # approval card. Mail goes only through the SmartBuddy connector (4e).
+    tools_cfg = data.setdefault("tools", {})
+    if tools_cfg.get("connectors") != {"enabled": False}:
+        tools_cfg["connectors"] = {"enabled": False}
+        dirty = True
+    nous = data.get("nous")
+    if not isinstance(nous, dict):
+        nous = data["nous"] = {}
+    if nous.get("guest") is not False:
+        nous["guest"] = False
         dirty = True
 
 # ---------- 5) realign cron jobs' model snapshot ----------
