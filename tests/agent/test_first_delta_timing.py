@@ -80,3 +80,36 @@ def test_completed_response_replay_does_not_claim_a_streamed_first_token(agent):
     assert result["final_response"] == "full response"
     assert agent._disable_streaming is True
     assert post[0]["first_delta_at"] is None
+
+
+@pytest.mark.parametrize("kind", ["text", "reasoningContent"])
+@pytest.mark.parametrize("empty_only", [False, True])
+def test_bedrock_first_delta_observed_without_display_consumers(agent, kind, empty_only):
+    from agent.chat_completion_helpers import _BedrockStream
+
+    agent.provider = "bedrock"
+    agent.reasoning_callback = None
+    agent.stream_delta_callback = None
+    delta = {"text": "hello"} if kind == "text" else {"reasoningContent": {"text": "thinking"}}
+    events = [{"contentBlockDelta": {"contentBlockIndex": 0, "delta": delta}},
+              {"messageStop": {"stopReason": "end_turn"}}]
+    observed, after_empty = [], []
+    class Stream:
+        final_response = None
+        def __iter__(self):
+            yield {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": ""}}}
+            after_empty.append(list(observed))
+            yield from events[1:] if empty_only else events
+        def close(self): pass
+    with patch.object(agent, "_has_stream_consumers", return_value=False), \
+            patch.object(agent, "_fire_stream_delta") as visible, \
+            patch.object(agent, "_fire_reasoning_delta") as reasoning, \
+            patch("agent.plugin_stream_hooks.has_reasoning_stream_observer_hooks", return_value=False), \
+            patch("agent.relay_llm.stream", return_value=Stream()):
+        stream = _BedrockStream(agent, {}, lambda: observed.append(True))
+        stream._worker()
+    assert stream.result["error"] is None
+    assert after_empty == [[]]
+    assert observed == ([] if empty_only else [True])
+    visible.assert_not_called()
+    reasoning.assert_not_called()

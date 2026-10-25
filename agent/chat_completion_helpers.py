@@ -2566,7 +2566,8 @@ class _BedrockStream:
     def _after_first(self, fire):
         """Wrap a delta callback so the first delivered event also fires ``on_first_delta``."""
         def _on(value):
-            self._fire_first()
+            if value:
+                self._fire_first()
             fire(value)
         return _on
 
@@ -2610,7 +2611,6 @@ class _BedrockStream:
             except Exception:
                 logger.debug("plugin reasoning stream observer check failed", exc_info=True)
                 plugin_reasoning_observer = False
-
             stream = relay_llm.stream(dict(self.api_kwargs), self._open_stream,
                 **_relay_stream_identity(agent, "bedrock"),
                 finalizer=lambda: _finalize_bedrock_relay_events(intercepted_events),
@@ -2621,9 +2621,9 @@ class _BedrockStream:
             wants_reasoning = agent.reasoning_callback or agent.stream_delta_callback or plugin_reasoning_observer
             try:
                 streamed_response = stream_converse_with_callbacks({"stream": stream},
-                    on_text_delta=self._after_first(agent._fire_stream_delta) if agent._has_stream_consumers() else None,
+                    on_text_delta=self._after_first(agent._fire_stream_delta) if agent._has_stream_consumers() else self._after_first(lambda _text: None),
                     on_tool_start=self._after_first(agent._fire_tool_gen_started),
-                    on_reasoning_delta=self._after_first(agent._fire_reasoning_delta) if wants_reasoning else None,
+                    on_reasoning_delta=self._after_first(agent._fire_reasoning_delta) if wants_reasoning else self._after_first(lambda _text: None),
                     on_interrupt_check=lambda: agent._interrupt_requested, on_event=_stamp_event)
             except EmptyStreamError:
                 # IAM-denied fallback: no stream events, but converse() already completed.
