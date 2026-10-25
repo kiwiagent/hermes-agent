@@ -81,6 +81,9 @@ def perform_api_call(
 
     def _stop_spinner():
         nonlocal thinking_spinner
+        if (not getattr(agent, "_disable_streaming", False)
+                and getattr(agent, "_last_api_first_delta_at", None) is None):
+            agent._last_api_first_delta_at = time.time()
         thinking_spinner = stop_thinking_spinner(agent, thinking_spinner)
 
     _use_streaming = _should_stream(agent)

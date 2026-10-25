@@ -1740,9 +1740,20 @@ Fires for each provider attempt immediately before sending it. This is observer-
 
 Fires after a provider response has been normalized successfully. This is observer-only. Prefer the sanitized `response`; `assistant_message` is the raw normalized message, and `usage` contains accounting data.
 
+The timing payload distinguishes `first_chunk_at` (epoch seconds of the first
+transport chunk) from `first_delta_at` (epoch seconds of the first semantic
+streaming callback: text, reasoning, or tool generation; Codex reports its first
+visible-text callback). Empty role/metadata chunks do not set `first_delta_at`.
+Both are optional; non-streamed calls (including replay of a completed response)
+have no first-delta observation. `attempt_started_at` is the epoch start of the
+current attempt and resets on retries; existing `started_at` keeps its logical-call
+accounting semantics. `first_delta_at - attempt_started_at` measures the observed
+first-output wait, not a provider-internal token timestamp.
+The SmartBuddy platform plugin consumes this timing to diagnose chat latency.
+
 #### `api_request_error`
 
-Fires for a failed provider attempt with status/retry timing, an `error` object, and sanitized `request`. This is observer-only. Error messages may still contain provider or user data.
+Fires for a failed provider attempt with status/retry timing and optional `first_delta_at`, an `error` object, and sanitized `request`. This is observer-only. Error messages may still contain provider or user data.
 
 ### Auxiliary-call observer hooks
 
