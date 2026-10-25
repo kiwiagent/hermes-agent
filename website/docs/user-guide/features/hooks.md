@@ -1744,9 +1744,11 @@ The timing payload distinguishes `first_chunk_at` (epoch seconds of the first
 transport chunk) from `first_delta_at` (epoch seconds of the first semantic
 streaming callback: text, reasoning, or tool generation; Codex reports its first
 visible-text callback). Empty role/metadata chunks do not set `first_delta_at`.
-Both are optional; non-streamed calls have no first-delta observation. Values
-reset per provider attempt, including retries. `first_delta_at - started_at`
-measures the observed first-output wait, not a provider-internal token timestamp.
+Both are optional; non-streamed calls (including replay of a completed response)
+have no first-delta observation. `attempt_started_at` is the epoch start of the
+current attempt and resets on retries; existing `started_at` keeps its logical-call
+accounting semantics. `first_delta_at - attempt_started_at` measures the observed
+first-output wait, not a provider-internal token timestamp.
 The SmartBuddy platform plugin consumes this timing to diagnose chat latency.
 
 #### `api_request_error`

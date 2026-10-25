@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import time
 from typing import Any
 
 from agent.message_sanitization import sanitize_outbound_kwargs, strip_images_for_rejecting_model
@@ -83,6 +84,7 @@ def _fire_pre_api_request_hook(
                 request_char_count=total_chars,
                 max_tokens=agent.max_tokens,
                 started_at=api_start_time,
+                attempt_started_at=getattr(agent, "_last_api_attempt_started_at", None),
                 middleware_trace=list(_llm_middleware_trace),
                 request=agent._api_request_payload_for_hook(api_kwargs),
             )
@@ -102,6 +104,7 @@ def build_api_request(
         _moa_client_consumes_prepared_request, _redecorate_prompt_cache_for_provider,
     )
 
+    agent._last_api_attempt_started_at = time.time()
     agent._reset_stream_delivery_tracking()
     # Per-attempt first-chunk timestamp so a stale value never leaks into post_api_request.
     agent._last_api_first_chunk_at = None

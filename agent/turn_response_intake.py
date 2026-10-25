@@ -79,9 +79,10 @@ def _fire_post_api_request_hook(
                 api_call_count=api_call_count,
                 api_duration=api_duration,
                 started_at=api_start_time,
+                attempt_started_at=getattr(agent, "_last_api_attempt_started_at", None),
                 ended_at=api_start_time + api_duration,
                 # First stream chunk time (epoch s); None if not streamed / no chunk.
-                # TTFB = first_chunk_at - started_at.
+                # Attempt TTFB = first_chunk_at - attempt_started_at.
                 first_chunk_at=getattr(agent, "_last_api_first_chunk_at", None),
                 # First semantic output callback (text/reasoning/tool generation),
                 # distinct from empty role/metadata chunks. None for non-streamed calls.
