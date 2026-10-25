@@ -186,6 +186,7 @@ class ApiRequestHooksMixin:
                 api_mode=self.api_mode,
                 api_call_count=api_call_count,
                 api_duration=ended_at - api_start_time,
+                first_delta_at=getattr(self, "_last_api_first_delta_at", None),
                 started_at=api_start_time,
                 ended_at=ended_at,
                 status_code=status_code,
