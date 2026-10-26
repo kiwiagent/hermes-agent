@@ -39,8 +39,9 @@ class DurableTurnLease:
     written only under ``_lock``.
     """
 
-    def __init__(self, agent, db, session_id: str, holder: str, *, expires_at: Optional[float] = None) -> None:
+    def __init__(self, agent, db, session_id: str, holder: str, *, expires_at: Optional[float] = None, owner=None) -> None:
         self.agent = agent
+        self.owner = owner
         self.db = db
         self.session_id = session_id  # id at admission; release always targets this row
         self.holder = holder
@@ -113,10 +114,15 @@ class DurableTurnLease:
     def release(self) -> None:
         """Release the row and drop the agent's holder attrs (only if they still name this lease)."""
         agent = self.agent
+        released = False
         try:
             self.db.release_session_turn_lease(self.session_id, self.holder)
+            released = True
         except Exception:
             logger.error("Failed to release session turn lease: %s", self.session_id, exc_info=True)
+        finally:
+            if self.owner is not None:
+                self.owner.close(remove=released)
         if getattr(agent, "_active_session_turn_lease_holder", None) == self.holder:
             agent._active_session_turn_lease_holder = None
             agent._active_session_turn_lease_ttl_seconds = None
@@ -341,19 +347,32 @@ def admit_durable_turn_lease(
             f"⏳ Still waiting for the other Hermes process on this session ({int(elapsed)}s)..."
         )
 
+    from hermes_state_turn_owner import TurnLeaseOwner
+    db_path = getattr(db, "db_path", None)
+    owner = TurnLeaseOwner(db_path) if isinstance(db_path, (str, os.PathLike)) and str(db_path) != ":memory:" else None
+    if owner is not None:
+        holder += f":owner={owner.token}"
     authority_floor = time.time()  # every acquisition attempt stamps its expiry after this instant
-    if not db.acquire_session_turn_lease(
-        session_id, holder, ttl_seconds=LEASE_TTL_SECONDS, wait_seconds=LEASE_WAIT_SECONDS,
-        on_wait=_on_wait, on_contended=_on_contended,
-        should_abort=lambda: getattr(agent, "_interrupt_requested", False),
-    ):
+    try:
+        acquired = db.acquire_session_turn_lease(
+            session_id, holder, ttl_seconds=LEASE_TTL_SECONDS, wait_seconds=LEASE_WAIT_SECONDS,
+            on_wait=_on_wait, on_contended=_on_contended,
+            should_abort=lambda: getattr(agent, "_interrupt_requested", False),
+        )
+    except BaseException:
+        if owner is not None:
+            owner.close()
+        raise
+    if not acquired:
+        if owner is not None:
+            owner.close()
         admission.early_result = _lease_not_acquired_result(agent, session_id, conversation_history)
         return admission
 
     # Assign only after admission so the finally cannot release a holder that never owned the
     # row; persist paths read the agent attr so a late flush is fenced in the same transaction.
     lease = DurableTurnLease(
-        agent, db, session_id, holder, expires_at=_committed_lease_expiry(db, session_id, holder, authority_floor),
+        agent, db, session_id, holder, expires_at=_committed_lease_expiry(db, session_id, holder, authority_floor), owner=owner,
     )
     agent._active_session_turn_lease_holder = holder
     agent._active_session_turn_lease_ttl_seconds = LEASE_TTL_SECONDS

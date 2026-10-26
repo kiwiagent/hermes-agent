@@ -1002,7 +1002,8 @@ class TestBrowserExec:
         result = json.loads(bu_cli.browser_exec('print("hi")'))
         assert result["success"] is True
         assert result["exit_code"] == 0
-        assert 'got:print("hi")' in result["output"]
+        assert result["output"].startswith("got:")
+        assert result["output"].rstrip().endswith('print("hi")')
         assert "session" not in result
 
     def test_session_sets_bu_name(self, tmp_path, monkeypatch):

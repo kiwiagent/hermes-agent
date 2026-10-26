@@ -690,10 +690,45 @@ def stop_harness_daemons() -> None:
             _run_cli_killing_process_group([*cmd, "--reload"], "", {**env, "BU_NAME": name}, 15)
 
 
+def _render_browser_exec_result(proc, started, workspace, session, release_challenge):
+    """Render browser output at the redaction boundary, releasing a detected private bot wall."""
+    from agent.redact import redact_sensitive_text
+    from tools.registry import tool_result
+    from tools.browser_use_challenge import CHALLENGE_MARKER
+
+    if release_challenge is not None and proc.returncode != 0 and CHALLENGE_MARKER in (proc.stderr or ""):
+        return tool_result({"success": False, "error_type": "bot_challenge",
+                            "error": "Bot verification blocked this page. Use another source instead of waiting or retrying.",
+                            **release_challenge()})
+
+    # browser_vault fill registers injected values with this forced model-egress
+    # boundary. Preserve raw stdout only for screenshot-path detection below.
+    result = {
+        "success": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "output": redact_sensitive_text(proc.stdout, force=True),
+    }
+    if workspace:
+        result["workspace"] = workspace
+    if session:
+        result["session"] = session
+    stderr = redact_sensitive_text((proc.stderr or "").strip(), force=True)
+    if len(stderr) > _STDERR_CAP_CHARS:
+        stderr = stderr[:_STDERR_CAP_CHARS] + "\n… (stderr truncated)"
+    if stderr:
+        result["stderr"] = stderr
+    screenshot = _find_screenshot(proc.stdout, started)
+    if screenshot:
+        result["screenshot_path"] = screenshot
+        native = _native_screenshot_result(result, screenshot)
+        if native is not None:
+            return native
+    return tool_result(result)
+
+
 def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT_S,
                  task_id: Optional[str] = None, local: bool = False):
     """Run Python code through the browser-use CLI, and return its output"""
-    from agent.redact import redact_sensitive_text
     from tools.registry import tool_error, tool_result
     if not code or not code.strip():
         return tool_error("No code provided. Pass Python that uses the pre-imported helpers, e.g. new_tab(\"https://example.com\") then print(page_info()).")
@@ -732,6 +767,9 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     private_browser = env.pop(_PRIVATE_BROWSER_SENTINEL, None)  # always pop: never exported to the CLI
     if session and not private_browser:
         code = _OWN_TAB_PREAMBLE + code
+    if private_browser:
+        from tools.browser_use_challenge import CHALLENGE_GUARD
+        code = CHALLENGE_GUARD + code
 
     workspace = _workspace_dir(task_id)
     if workspace:
@@ -771,29 +809,12 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
         return tool_result(dispatched)
     proc = dispatched["proc"]
 
-    # browser_vault fill registers injected values with this forced model-egress
-    # boundary. Preserve raw stdout only for screenshot-path detection below.
-    result = {
-        "success": proc.returncode == 0,
-        "exit_code": proc.returncode,
-        "output": redact_sensitive_text(proc.stdout, force=True),
-    }
-    if workspace:
-        result["workspace"] = workspace
-    if session:
-        result["session"] = session
-    stderr = redact_sensitive_text((proc.stderr or "").strip(), force=True)
-    if len(stderr) > _STDERR_CAP_CHARS:
-        stderr = stderr[:_STDERR_CAP_CHARS] + "\n… (stderr truncated)"
-    if stderr:
-        result["stderr"] = stderr
-    screenshot = _find_screenshot(proc.stdout, started)
-    if screenshot:
-        result["screenshot_path"] = screenshot
-        native = _native_screenshot_result(result, screenshot)
-        if native is not None:
-            return native
-    return tool_result(result)
+    release_challenge = None
+    if private_browser:
+        from tools.browser_use_challenge import release_challenged_browser
+        release_challenge = lambda: release_challenged_browser(
+            cmd, env, task_id, session, local_sidecar, fenced=bot_desktop_browser)
+    return _render_browser_exec_result(proc, started, workspace, session, release_challenge)
 
 
 _HEADER_BASE = (
