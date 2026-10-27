@@ -60,34 +60,46 @@ _EMAIL_PATTERNS = [
 # ``help="himalaya config for every connected mailbox"`` was the 2026-10-28
 # card that showed on every SmartBuddy turn, and ``usage=``/``prog=`` etc. read
 # the same way. Position matters, not the name: a plain
-# ``usage = "himalaya"`` assignment still counts.
-_HIMALAYA_VAR_RE = re.compile(r"""\b([a-z_]\w*)\s*=\s*['"]?himalaya\b""", _FLAGS)
+# ``usage = "himalaya"`` assignment still counts, and an attribute
+# (``parser.description = …``) is not a keyword argument at all.
+_HIMALAYA_VAR_RE = re.compile(
+    r"""(?<![.\w])([a-z_]\w*)\s*=\s*['"]?himalaya\b""", _FLAGS)
 _LABEL_KWARGS = frozenset(
     {"help", "description", "metavar", "dest", "usage", "epilog", "prog"})
 _STRING_LITERAL_RE = re.compile(r"""(["'])(?:\\.|(?!\1)[^\\])*\1""")
+_TRIPLE_STRING_RE = re.compile(r'"{3}[\s\S]*?"{3}|\'{3}[\s\S]*?\'{3}')
 _COMMENT_RE = re.compile(r"#[^\n]*")
+_SIGNATURE_RE = re.compile(r"\b(?:def|class)\s+\w+\s*$")
 
 
 def _is_label_kwarg(text: str, start: int) -> bool:
     """True when the assignment at ``start`` is a call's keyword argument.
 
-    Only an *open* bracket on the line makes a label; the same name assigned
-    on its own line (``usage = "himalaya"``, then handed to the mail client)
-    is still a send. Strings and comments are dropped first, so a comma at the
-    end of a comment cannot pass for an argument separator."""
-    prefix = _COMMENT_RE.sub("", _STRING_LITERAL_RE.sub("", text[:start]))
-    depth = 0
-    for ch in prefix:
+    Only an open bracket that is still waiting for its first argument makes a
+    label; the same name assigned on its own line (``usage = "himalaya"``,
+    then handed to the mail client) is still a send. A signature's default
+    (``def send(prog="himalaya")``) is not an argument either: the ``def``
+    opens a bracket, but the name is then used to send. Strings and comments
+    are dropped first, so a comma at the end of a comment cannot pass for an
+    argument separator."""
+    prefix = _COMMENT_RE.sub("", _TRIPLE_STRING_RE.sub("", text[:start]))
+    prefix = _STRING_LITERAL_RE.sub("", prefix)
+    openers = []
+    for pos, ch in enumerate(prefix):
         if ch in "([{":
-            depth += 1
+            openers.append(pos)
         elif ch in ")]}":
-            depth = max(0, depth - 1)
-    return depth > 0 and prefix.rstrip().endswith((",", "(", "["))
+            if openers:
+                openers.pop()
+    if not openers or not prefix.rstrip().endswith((",", "(", "[")):
+        return False
+    return not _SIGNATURE_RE.search(prefix[: openers[-1]])
 
 
 def _himalaya_hidden_in_a_variable(text: str) -> bool:
     for m in _HIMALAYA_VAR_RE.finditer(text):
-        if m.group(1) in _LABEL_KWARGS and _is_label_kwarg(text, m.start()):
+        if (m.group(1).lower() in _LABEL_KWARGS
+                and _is_label_kwarg(text, m.start())):
             continue
         return True
     return False

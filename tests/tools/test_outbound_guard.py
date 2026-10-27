@@ -764,3 +764,40 @@ class TestInstalledCliOwnSourceNeverAsks:
     def test_a_real_assignment_naming_the_mail_client_still_asks(self, text):
         found, key, _ = detect_outbound_action(text)
         assert found and key == "outbound:email"
+
+    @pytest.mark.parametrize("text", [
+        'def send(prog="himalaya"):\n    subprocess.run([prog, "message", "send"])',
+        'def send(a,\n         prog="himalaya"):\n    subprocess.run([prog, "message", "send"])',
+        'class Send(prog="himalaya"):\n    run([prog, "message", "send"])',
+        'HELP="himalaya"\nsubprocess.run([HELP, "message", "send"])',
+    ])
+    def test_a_signature_default_is_not_a_label(self, text):
+        # A `def` opens a bracket, but its default then names the mail client
+        # for a real send (round 5).
+        found, key, _ = detect_outbound_action(text)
+        assert found and key == "outbound:email"
+
+    def test_an_attribute_assignment_is_not_a_label(self):
+        # Only a keyword argument is a label: `parser.description = ...` is an
+        # attribute write, not a label (round 5).
+        assert detect_outbound_action(
+            'parser.description = "himalaya login"')[0] is False
+
+    def test_a_docstring_quote_does_not_hide_a_label(self):
+        # A `"` inside a docstring used to end the scrub early and leave the
+        # label below counted as a send (round 5).
+        text = ('"""a " b"""\n'
+                'parser.add_argument("setup", help="himalaya config")\n')
+        assert detect_outbound_action(text)[0] is False
+
+    def test_an_upper_case_label_is_not_a_send(self):
+        # Label names are compared case-insensitively (round 5).
+        assert detect_outbound_action(
+            'parser.add_argument("x", HELP="himalaya config")')[0] is False
+
+    def test_a_read_only_wrapper_still_asks(self):
+        # Accepted over-ask: with the client in a plain variable the guard
+        # cannot tell a read from a send, and asking is the safe direction.
+        found, key, _ = detect_outbound_action(
+            'HIMALAYA = "himalaya"\nrun([HIMALAYA, "message", "list"])')
+        assert found and key == "outbound:email"
