@@ -648,24 +648,34 @@ class TestInstalledCliOwnSourceNeverAsks:
         cli = self._install(tmp_path, monkeypatch)
         assert detect_outbound_command(f"python3 {cli} {args}")[0] is False
 
-    def test_same_cli_through_a_symlink_or_relative_path_never_asks(self, tmp_path, monkeypatch):
+    @pytest.mark.platforms("posix")
+    def test_symlinked_cli_never_asks(self, tmp_path, monkeypatch):
         cli = self._install(tmp_path, monkeypatch)
         link = tmp_path / "bin" / "sb.py"
         link.parent.mkdir()
         link.symlink_to(cli)
         assert detect_outbound_command(f"python3 {link} calendar")[0] is False
+
+    def test_relative_path_to_the_cli_never_asks(self, tmp_path, monkeypatch):
+        cli = self._install(tmp_path, monkeypatch)
         assert detect_outbound_command("python3 sb.py calendar", cwd=str(cli.parent))[0] is False
 
-    def test_plugin_module_beside_the_cli_never_asks(self, tmp_path, monkeypatch):
+    def test_sibling_module_really_sending_still_asks(self, tmp_path, monkeypatch):
+        # Only the CLI file is exempt: a file beside it is the buddy's own
+        # code and judged like any other script.
         cli = self._install(tmp_path, monkeypatch)
         helper = cli.parent / "area.py"
-        helper.write_text('TEMPLATE = "himalaya message send -a me@x.co"\n')
-        assert detect_outbound_command(f"python3 {helper}")[0] is False
+        helper.write_text(
+            'import subprocess\n'
+            'subprocess.run(["himalaya", "message", "send", "-a", "me@x.co"])\n'
+        )
+        found, key, _ = detect_outbound_command(f"python3 {helper}")
+        assert found and key == "outbound:email"
 
-    def test_cron_scanning_the_cli_never_asks(self, tmp_path, monkeypatch):
-        from tools.outbound_guard import detect_outbound_script_file
+    def test_mail_send_through_the_cli_still_asks(self, tmp_path, monkeypatch):
         cli = self._install(tmp_path, monkeypatch)
-        assert detect_outbound_script_file(str(cli))[0] is False
+        found, key, _ = detect_outbound_command(f"python3 {cli} mail send -a me@x.co")
+        assert found and key == "outbound:email"
 
     def test_description_string_in_own_script_is_not_a_send(self):
         text = 'mail.add_parser("setup", help="himalaya config for every connected mailbox")'
