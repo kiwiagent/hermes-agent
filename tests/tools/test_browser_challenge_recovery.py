@@ -116,3 +116,34 @@ def test_destructive_close_excludes_human_ownership_transition(monkeypatch, owne
     result = release_challenged_browser(['fake-browser'], {}, 'research', '', False, fenced=True)
     assert result['browser_released'] is True
     assert blocked == [True]
+
+
+@pytest.mark.parametrize('code', [
+    'wait_for_load()\nshow_wall()\nprint(js("document.body.innerText"))\nexpensive_retry()',
+    'wait_for_load()\nshow_wall()\nprint("done")',
+])
+def test_late_challenge_aborts_and_releases_browser(monkeypatch, owned_browser, code):
+    waited = []
+    page = {'title': 'Offers', 'text': 'Available deals'}
+    def run(cmd, payload, env, timeout):
+        if '--reload' in cmd:
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        def js(expr):
+            return page['text'] if expr == 'document.body.innerText' else dict(page)
+        def show_wall():
+            page.update(title='Just a moment...', text='Performing security verification. Verify you are human.')
+        namespace = {'js': js, 'wait_for_load': lambda: None, 'show_wall': show_wall,
+                     'expensive_retry': lambda: waited.append(True)}
+        stdout, stderr = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout):
+                exec(payload, namespace)
+        except Exception as exc:
+            stderr.write(str(exc))
+        return subprocess.CompletedProcess(cmd, bool(stderr.getvalue()), stdout.getvalue(), stderr.getvalue())
+    monkeypatch.setattr(bu, '_run_cli_killing_process_group', run)
+    result = json.loads(bu.browser_exec(code, task_id='research'))
+    assert result['success'] is False
+    assert result['error_type'] == 'bot_challenge'
+    assert waited == []
+    owned_browser.assert_called_once_with(bu._backend_cache_key('research'))

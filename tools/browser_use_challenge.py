@@ -23,15 +23,15 @@ def _hermes_check_challenge():
     challenge_body = any(s in text for s in ('performing security verification', 'verify you are human', 'checking your browser', 'enable javascript and cookies to continue'))
     if challenge_title and challenge_body:
         raise RuntimeError('HERMES_BROWSER_BOT_CHALLENGE: bot verification requires a different source; do not wait or retry this page.')
-def _hermes_guard_navigation(fn):
+def _hermes_guard_browser_call(fn):
     def guarded(*args, **kwargs):
         result = fn(*args, **kwargs)
         _hermes_check_challenge()
         return result
     return guarded
-for _hermes_name in ('new_tab', 'goto_url', 'wait_for_load'):
+for _hermes_name in ('new_tab', 'goto_url', 'wait_for_load', 'js', 'page_info'):
     if callable(globals().get(_hermes_name)):
-        globals()[_hermes_name] = _hermes_guard_navigation(globals()[_hermes_name])
+        globals()[_hermes_name] = _hermes_guard_browser_call(globals()[_hermes_name])
 _hermes_check_challenge()
 '''
 

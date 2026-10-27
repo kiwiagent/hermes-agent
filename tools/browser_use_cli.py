@@ -769,7 +769,7 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
         code = _OWN_TAB_PREAMBLE + code
     if private_browser:
         from tools.browser_use_challenge import CHALLENGE_GUARD
-        code = CHALLENGE_GUARD + code
+        code = CHALLENGE_GUARD + code + "\n_hermes_check_challenge()\n"
 
     workspace = _workspace_dir(task_id)
     if workspace:

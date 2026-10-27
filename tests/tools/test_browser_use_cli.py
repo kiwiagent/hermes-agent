@@ -1003,7 +1003,7 @@ class TestBrowserExec:
         assert result["success"] is True
         assert result["exit_code"] == 0
         assert result["output"].startswith("got:")
-        assert result["output"].rstrip().endswith('print("hi")')
+        assert '\nprint("hi")\n' in result["output"]
         assert "session" not in result
 
     def test_session_sets_bu_name(self, tmp_path, monkeypatch):
