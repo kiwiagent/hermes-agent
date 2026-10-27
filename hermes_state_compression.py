@@ -605,6 +605,7 @@ class SessionCompressionMixin:
         lineage root). The walk, the INSERT, and reclaim of expired or dead-local-PID leases
         share one write transaction."""
         from hermes_state import _compression_lock_holder_process_is_dead
+        from hermes_state_turn_owner import turn_owner_is_dead, discard_dead_turn_owner
         if not session_id or not holder:
             return False
         now = time.time()
@@ -619,9 +620,13 @@ class SessionCompressionMixin:
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
             return _claim_lease_row(
                 conn, "session_turn_leases", "conversation_id", conversation_id, holder, now, expires_at,
-                lambda h, e: float(e) <= now or _compression_lock_holder_process_is_dead(h),
-            )[0]
-        return bool(self._execute_write(_do, patience_s=patience_s))
+                lambda h, e: float(e) <= now or _compression_lock_holder_process_is_dead(h)
+                or turn_owner_is_dead(self.db_path, h),
+            )
+        acquired, reclaimed = self._execute_write(_do, patience_s=patience_s)
+        if acquired and reclaimed:
+            discard_dead_turn_owner(self.db_path, reclaimed)
+        return bool(acquired)
 
     def acquire_session_turn_lease(
         self, session_id: str, holder: str, *, ttl_seconds: float = 300.0,

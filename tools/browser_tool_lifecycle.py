@@ -615,6 +615,14 @@ def _drop_last_active_binding(task_id: str) -> None:
         _bt._last_active_session_key.pop(bare_task_id, None)
 
 
+def cleanup_browser_session(session_key: str) -> None:
+    """Close exactly one route, preserving a live hybrid sibling and its binding."""
+    _cleanup_single_browser_session(session_key)
+    bare_task_id = _bt._bare_task_id_for_session_key(session_key)
+    if _bt._last_active_session_key.get(bare_task_id) == session_key:
+        _drop_last_active_binding(session_key)
+
+
 def cleanup_browser(task_id: Optional[str] = None) -> None:
     """Clean up browser session(s) for a task: a bare task id reaps BOTH the primary
     session and any hybrid local sidecar; a ``::local`` key reaps only that one."""
