@@ -24,6 +24,12 @@ from urllib.parse import urlsplit
 
 _FLAGS = re.IGNORECASE | re.MULTILINE
 
+# SmartBuddy's platform CLI (kiwiagent 2026-10-27): its writes go to an
+# internal address, so the HTTP rules let them through — judged by subcommand
+# instead. Also matched as a subprocess argument list. Reads don't match.
+_SB = r"""\bsb(?:\.py)?['"]?[\s,'"]+"""
+
+
 _EMAIL_PATTERNS = [
     r"\bsmtplib\b",
     r"\bSMTP(?:_SSL)?\s*\(",
@@ -43,12 +49,15 @@ _EMAIL_PATTERNS = [
     # The platform CLI's mail writes (kiwiagent 2026-10-28): the installed
     # CLI's own source is exempt from the scan (see _is_platform_cli), so a
     # send asked for through the CLI has to show on the command line.
-    r"""\bsb(?:\.py)?['"]?[\s,'"]+mail['"]?[\s,'"]+(?:send|write|compose|reply|forward|fwd)\b""",
+    # `mail unsubscribe` is deliberately not here: the plugin's own contract
+    # test (smartbuddy-hermes-plugin tests/test_sb_cli.py) has that one run
+    # without a card, so changing it is a plugin-side decision first.
+    _SB + r"""mail['"]?[\s,'"]+(?:send|write|compose|reply|forward|fwd)\b""",
     # ...but not with a description keyword: an argparse
     # ``help="himalaya config for every connected mailbox"`` (or a
-    # description/metavar/usage string) documents the mail client for a human;
-    # it is not a hidden way to send through it.
-    r"""\b(?!help\s*=|description\s*=|metavar\s*=|dest\s*=|usage\s*=|epilog\s*=)[a-z_]\w*=['"]?himalaya\b""",
+    # description/metavar/usage/prog string) documents the mail client for a
+    # human; it is not a hidden way to send through it.
+    r"""\b(?!help\s*=|description\s*=|metavar\s*=|dest\s*=|usage\s*=|epilog\s*=|prog\s*=)[a-z_]\w*=['"]?himalaya\b""",
 ]
 
 _MESSAGE_PATTERNS = [
@@ -60,10 +69,6 @@ _MESSAGE_PATTERNS = [
     r"graph\.facebook\.com/\S*/messages",
 ]
 
-# SmartBuddy's platform CLI (kiwiagent 2026-10-27): its writes go to an
-# internal address, so the HTTP rules let them through — judged by subcommand
-# instead. Also matched as a subprocess argument list. Reads don't match.
-_SB = r"""\bsb(?:\.py)?['"]?[\s,'"]+"""
 _CALENDAR_PATTERNS = [
     _SB + r"""gcal['"]?[\s,'"]+(?:add|change|delete)\b""",
 ]
@@ -407,10 +412,13 @@ def _notion_read_only(text: str) -> bool:
     return True
 
 
-# `python3 x.py`, `bash -e run.sh`, `node a.js`, `./send.sh`
+# `python3 x.py`, `bash -e run.sh`, `node a.js`, `./send.sh` — and the same
+# with the path quoted (`python3 "my script.py"`), which used to skip the scan.
+_SCRIPT_EXT = r"\.(?:py|sh|bash|js|mjs|cjs|jsx|tsx|mts|cts|ts|rb|pl)"
 _SCRIPT_RUN_RE = re.compile(
     r"(?:^|[\s;|&(])(?:(?:python[\d.]*|bash|sh|zsh|node|ruby|perl)\s+(?:-\S+\s+)*)?"
-    r"((?:\.{0,2}/)?[\w./~-]+\.(?:py|sh|bash|js|mjs|cjs|jsx|tsx|mts|cts|ts|rb|pl))\b"
+    r"""(?:['"]([^'"]+""" + _SCRIPT_EXT + r""")['"]"""
+    r"""|((?:\.{0,2}/)?[\w./~-]+""" + _SCRIPT_EXT + r""")(?![\w.]))"""
 )
 _MAX_SCRIPT_BYTES = 256 * 1024
 
@@ -515,7 +523,7 @@ def allowable_http_host(key: Optional[str]) -> Optional[str]:
 def _script_paths(command: str) -> list[str]:
     paths = []
     for m in _SCRIPT_RUN_RE.finditer(command):
-        paths.append(m.group(1))
+        paths.append(m.group(1) or m.group(2))
     return paths
 
 
