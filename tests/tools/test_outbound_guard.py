@@ -211,8 +211,8 @@ class TestCommandWithScriptFile:
         'python3 "{script}" --to boss',
     ])
     def test_quoted_script_path_is_still_scanned(self, tmp_path, template):
-        # Review round 2: quoting the path used to skip the file scan entirely,
-        # so a buddy script's send went unflagged.
+        # A quoted path used to skip the file scan entirely, so a buddy
+        # script's send went unflagged.
         script = tmp_path / "send_report.py"
         script.write_text("import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
 
@@ -756,6 +756,9 @@ class TestInstalledCliOwnSourceNeverAsks:
         'table.add_row(name="x", usage="himalaya login")',
         'dict(help="himalaya config")',
         'mail.add_parser(\n    "setup",\n    help="himalaya config",\n)',
+        # A `#` or a bracket inside a one-line string is text, not structure.
+        'f("a # b", help="himalaya config")',
+        'f(")", help="himalaya config")',
     ])
     def test_a_label_naming_the_mail_client_is_not_a_send(self, text):
         assert detect_outbound_action(text)[0] is False
@@ -766,18 +769,31 @@ class TestInstalledCliOwnSourceNeverAsks:
         'help = "himalaya"\nhelp.send()',
         'client="himalaya"\nclient.message.send()',
         # An attribute that holds the client is a real configuration, not a
-        # label — base caught the bare form and still must (round 6).
+        # label — base caught the bare form and still must.
         'cfg.client="himalaya"\nsubprocess.run([cfg.client, "message", "send"])',
         'self.mail="himalaya"\nsubprocess.run([self.mail, "message", "send"])',
         'x.y.client="himalaya"\nrun([x.y.client, "message", "send"])',
         # A comma or an open bracket left over from an earlier line does not
-        # make the next line a keyword argument (round 4).
+        # make the next line a keyword argument.
         'x = 1,\nusage="himalaya"\nsubprocess.run([usage, "message", "send"])',
         '# list the mail hosts,\nusage="himalaya"\nsubprocess.run([usage, "send"])',
+        # Structure inside a string is not structure: an unmatched bracket in
+        # one does not open a call, and a `#` in one does not start a comment.
+        'f("a # b")\nclient="himalaya"\nsubprocess.run([client, "message", "send"])',
+        's = "("\nclient="himalaya"\nrun([client, "message", "send"])',
+        '# f(help="himalaya config")\nusage = "himalaya"\nrun([usage, "send"])',
     ])
     def test_a_real_assignment_naming_the_mail_client_still_asks(self, text):
         found, key, _ = detect_outbound_action(text)
         assert found and key == "outbound:email"
+
+    def test_a_long_label_dense_help_text_is_read_to_the_end(self):
+        # One pass, not one rescan per label: every line here names the client
+        # in a help string, and none of them is a send.
+        text = "\n".join(
+            f'p.add_argument("--opt{i}", help="himalaya config for mailbox {i}")'
+            for i in range(200))
+        assert detect_outbound_action(text)[0] is False
 
     @pytest.mark.parametrize("text", [
         'def send(prog="himalaya"):\n    subprocess.run([prog, "message", "send"])',
@@ -787,7 +803,7 @@ class TestInstalledCliOwnSourceNeverAsks:
     ])
     def test_a_signature_default_is_not_a_label(self, text):
         # A `def` opens a bracket, but its default then names the mail client
-        # for a real send (round 5).
+        # for a real send.
         found, key, _ = detect_outbound_action(text)
         assert found and key == "outbound:email"
 
@@ -802,13 +818,13 @@ class TestInstalledCliOwnSourceNeverAsks:
 
     def test_a_docstring_quote_does_not_hide_a_label(self):
         # A `"` inside a docstring used to end the scrub early and leave the
-        # label below counted as a send (round 5).
+        # label below counted as a send.
         text = ('"""a " b"""\n'
                 'parser.add_argument("setup", help="himalaya config")\n')
         assert detect_outbound_action(text)[0] is False
 
     def test_an_upper_case_label_is_not_a_send(self):
-        # Label names are compared case-insensitively (round 5).
+        # Label names are compared case-insensitively.
         assert detect_outbound_action(
             'parser.add_argument("x", HELP="himalaya config")')[0] is False
 

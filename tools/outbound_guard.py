@@ -24,12 +24,6 @@ from urllib.parse import urlsplit
 
 _FLAGS = re.IGNORECASE | re.MULTILINE
 
-# SmartBuddy's platform CLI (kiwiagent 2026-10-27): its writes go to an
-# internal address, so the HTTP rules let them through — judged by subcommand
-# instead. Also matched as a subprocess argument list. Reads don't match.
-_SB = r"""\bsb(?:\.py)?['"]?[\s,'"]+"""
-
-
 _EMAIL_PATTERNS = [
     r"\bsmtplib\b",
     r"\bSMTP(?:_SSL)?\s*\(",
@@ -47,11 +41,12 @@ _EMAIL_PATTERNS = [
     # split by quotes ('mess''age' send), or himalaya hidden in a variable.
     r"""\bhimalaya\b[^\n;|&]*?(?:mess|msg|templ|tpl)['"a-z]*[\s,]+['"]?(?:send|write|compose|reply|forward|fwd)\b""",
     # The installed CLI's own source is exempt from the scan (see
-    # _is_platform_cli), so a mail-send subcommand would have to show on the
-    # command line; the shipped CLI has none (mail goes out through himalaya
-    # above, and its `mail unsubscribe` is cardless by the plugin's contract
-    # test in smartbuddy-hermes-plugin tests/test_sb_cli.py). Add a rule here
-    # when a send subcommand ships.
+    # _is_platform_cli), so the mail client it configures is judged on the
+    # command line that runs it. The shipped CLI has no mail-send subcommand
+    # (its `mail unsubscribe` is cardless by the plugin's contract test in
+    # smartbuddy-hermes-plugin tests/test_sb_cli.py); one that ships needs a
+    # rule of its own here, and a himalaya run it starts is caught by the
+    # patterns above whether or not the code was read from a file.
 ]
 
 # himalaya hidden in a variable: ``client = "himalaya"`` then
@@ -69,43 +64,63 @@ _HIMALAYA_SPACED_VAR_RE = re.compile(
     r"""(?<!\.)(?<!\w)([a-z_]\w*)\s*=\s*['"]?himalaya\b""", _FLAGS)
 _LABEL_KWARGS = frozenset(
     {"help", "description", "metavar", "dest", "usage", "epilog", "prog"})
-_STRING_LITERAL_RE = re.compile(r"""(["'])(?:\\.|(?!\1)[^\\])*\1""")
-_TRIPLE_STRING_RE = re.compile(r'"{3}[\s\S]*?"{3}|\'{3}[\s\S]*?\'{3}')
-_COMMENT_RE = re.compile(r"#[^\n]*")
 _SIGNATURE_RE = re.compile(r"\b(?:def|class)\s+\w+\s*$")
 
-
-def _is_label_kwarg(text: str, start: int) -> bool:
-    """True when the assignment at ``start`` is a call's keyword argument.
-
-    An argument boundary — ``(``, ``[`` or ``,`` before it inside an open
-    bracket — makes a label; the same name assigned on its own line
-    (``usage = "himalaya"``, then handed to the mail client) is still a send.
-    A signature's default (``def send(prog="himalaya")``) is not an argument
-    either: the ``def`` opens a bracket, but the name is then used to send.
-    Strings and comments are dropped first, so a comma at the end of a comment
-    cannot pass for an argument separator."""
-    prefix = _COMMENT_RE.sub("", _TRIPLE_STRING_RE.sub("", text[:start]))
-    prefix = _STRING_LITERAL_RE.sub("", prefix)
-    openers = []
-    for pos, ch in enumerate(prefix):
-        if ch in "([{":
-            openers.append(pos)
-        elif ch in ")]}":
-            if openers:
-                openers.pop()
-    if not openers or not prefix.rstrip().endswith((",", "(", "[")):
-        return False
-    return not _SIGNATURE_RE.search(prefix[: openers[-1]])
+# What a bracket counter must step over rather than count: strings, comments,
+# docstrings — matched at C speed, so a label-dense file costs one scan.
+_STRUCTURE_RE = re.compile(
+    r'"""(?:\\.|(?!""")[\s\S])*"""'
+    r"|'''(?:\\.|(?!''')[\s\S])*'''"
+    r"|#[^\n]*"
+    r'|"(?:\\.|[^"\\\n])*"'
+    r"|'(?:\\.|[^'\\\n])*'"
+    r"|[()\[\]{}]"
+)
 
 
 def _himalaya_hidden_in_a_variable(text: str) -> bool:
-    for pattern in (_HIMALAYA_VAR_RE, _HIMALAYA_SPACED_VAR_RE):
-        for m in pattern.finditer(text):
-            if (m.group(1).lower() in _LABEL_KWARGS
-                    and _is_label_kwarg(text, m.start())):
-                continue
-            return True
+    """True when the text names the mail client outside a human-facing label."""
+    mentions = sorted(
+        (m.start(), m.group(1).lower())
+        for pattern in (_HIMALAYA_VAR_RE, _HIMALAYA_SPACED_VAR_RE)
+        for m in pattern.finditer(text)
+    )
+    if not mentions:
+        return False
+    calls: list[bool] = []  # per open bracket: opened by a def/class head?
+    last = ""  # last visible character before the cursor
+    tail = ""  # visible text, for the def/class lookback
+    tokens = _STRUCTURE_RE.finditer(text)
+    token = next(tokens, None)
+    cursor = 0
+    for start, name in mentions:
+        while token is not None and token.start() < start:
+            raw = text[cursor:token.start()]
+            tail = (tail + raw)[-256:]
+            run = raw.rstrip()
+            if run:
+                last = run[-1]
+            bracket = token.group() if token.group() in "([{)]}" else ""
+            if bracket:
+                if bracket in "([{":
+                    calls.append(bool(_SIGNATURE_RE.search(tail)))
+                elif calls:
+                    calls.pop()
+                last = bracket
+                tail = (tail + bracket)[-256:]
+            cursor = token.end()
+            token = next(tokens, None)
+        raw = text[cursor:start]
+        tail = (tail + raw)[-256:]
+        run = raw.rstrip()
+        if run:
+            last = run[-1]
+        # An argument boundary inside a call makes a label; a signature's
+        # default is not an argument, so ``def send(prog="himalaya")`` counts.
+        if (name in _LABEL_KWARGS and calls and not calls[-1]
+                and last and last in ",(["):
+            continue
+        return True
     return False
 
 
@@ -117,6 +132,11 @@ _MESSAGE_PATTERNS = [
     r"discord(?:app)?\.com/api/webhooks",
     r"graph\.facebook\.com/\S*/messages",
 ]
+
+# SmartBuddy's platform CLI (kiwiagent 2026-10-27): its writes go to an
+# internal address, so the HTTP rules let them through — judged by subcommand
+# instead. Also matched as a subprocess argument list. Reads don't match.
+_SB = r"""\bsb(?:\.py)?['"]?[\s,'"]+"""
 
 _CALENDAR_PATTERNS = [
     _SB + r"""gcal['"]?[\s,'"]+(?:add|change|delete)\b""",
@@ -578,7 +598,7 @@ def _script_paths(command: str) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-def _read_script(raw: str, cwd: Optional[str]) -> Optional[Tuple[str, str]]:
+def _read_script(raw: str, cwd: Optional[str]) -> Optional[tuple[str, str]]:
     """(realpath of the script ``raw`` names, its source), or None.
 
     The path comes back with the source because the scan needs to know *whose*
