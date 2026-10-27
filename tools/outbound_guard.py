@@ -37,6 +37,10 @@ _EMAIL_PATTERNS = [
     # himalaya (SmartBuddy mail skill): message send/write/compose/reply/forward,
     # template send — also as a subprocess argument list. Reads don't match.
     r"""\bhimalaya\b[^\n;|&]*?\b(?:message|msg|template|tpl)['"]?[\s,'"]+(?:send|write|compose|reply|forward|fwd)\b""",
+    # kiwiagent (security review 2026-10-27): the same with the subcommand
+    # split by quotes ('mess''age' send), or himalaya hidden in a variable.
+    r"""\bhimalaya\b[^\n;|&]*?(?:mess|msg|templ|tpl)['"a-z]*[\s,]+['"]?(?:send|write|compose|reply|forward|fwd)\b""",
+    r"""\b[a-z_]\w*=['"]?himalaya\b""",
 ]
 
 _MESSAGE_PATTERNS = [

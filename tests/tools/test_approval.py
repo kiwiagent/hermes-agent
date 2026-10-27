@@ -575,9 +575,10 @@ class TestSensitiveRedirectPattern:
             "printenv | tee .env#backup",
         ):
             dangerous, key, desc = detect_dangerous_command(command)
-            assert dangerous is False, command
-            assert key is None
-            assert desc is None
+            # kiwiagent (2026-10-27): reading .env and listing the environment
+            # now ask on their own (secret reads); what must hold here is that
+            # these aren't taken for a write to the project's env/config.
+            assert not (dangerous and "project env/config" in (desc or "").lower()), command
 
 
 class TestProjectSensitiveCopyPattern:
