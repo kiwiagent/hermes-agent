@@ -518,3 +518,84 @@ class TestHostKeyThroughBaseConstant:
     def test_unsure_base_gets_generic_key(self, text):
         found, key, _ = detect_outbound_action(text)
         assert found and key == "outbound:http"
+
+
+SB = "/opt/hermes/plugins/platforms/smartbuddy/sb.py"
+
+
+class TestSmartBuddyCalendarWrites:
+    """kiwiagent 2026-10-27: `sb gcal add/change/delete` write the user's
+    Google Calendar through the platform (an internal address, so the HTTP
+    rules let it through) — with no approval card. They now need one, and it
+    can never be always-allowed."""
+
+    @pytest.mark.parametrize("text", [
+        f'python3 {SB} gcal add --title "Dentist" --start 2026-10-30T09:00:00+13:00',
+        f"python3 {SB} gcal change abc123 --start 2026-10-31T10:00:00+13:00",
+        f"python3 {SB} gcal delete abc123",
+        "sb gcal add --title 'Swim' --date 2026-11-02",
+        "sb gcal delete abc123",
+        f"subprocess.run(['python3', '{SB}', 'gcal', 'delete', eid])",
+        "subprocess.run([\"python3\", SB, \"gcal\", \"add\", \"--title\", t])",
+    ])
+    def test_detected(self, text):
+        found, key, desc = detect_outbound_action(text)
+        assert found and key == "outbound:calendar"
+        assert desc == "change your calendar"
+        assert allowable_http_host(key) is None  # never "Always allow"
+
+    @pytest.mark.parametrize("text", [
+        f"python3 {SB} calendar --from 2026-10-30T00:00:00Z --to 2026-10-31T00:00:00Z",
+        "sb calendar",
+        f"python3 {SB} whoami",
+        f'python3 {SB} mail search "from:bank"',
+        "grep -n 'gcal add' notes.txt",
+    ])
+    def test_reading_is_not_outbound(self, text):
+        assert detect_outbound_action(text)[0] is False
+
+
+class TestSmartBuddyFacebookWrites:
+    """Posting on (or deleting from) the user's Facebook Page publishes as
+    them: an approval card, like any publish. Boosts are created paused (the
+    user starts them in the app), so preparing one doesn't ask."""
+
+    @pytest.mark.parametrize("text", [
+        f'python3 {SB} facebook post --text "Open day Saturday!"',
+        "sb facebook post --link https://example.com --text hi",
+        f"python3 {SB} facebook delete 123_456",
+    ])
+    def test_detected(self, text):
+        found, key, desc = detect_outbound_action(text)
+        assert found and key == "outbound:publish"
+        assert desc == "post on Facebook"
+
+    @pytest.mark.parametrize("text", [
+        f"python3 {SB} facebook status",
+        f"python3 {SB} facebook posts",
+        f"python3 {SB} facebook boost 123_456 --budget 20 --days 3",
+        f"python3 {SB} facebook pause 999",
+    ])
+    def test_not_outbound(self, text):
+        assert detect_outbound_action(text)[0] is False
+
+
+class TestPlatformCliSource:
+    """The command scan also reads the scripts a command runs. sb.py's own
+    help text names `sb gcal add` etc., so reading it must not turn every sb
+    call into a calendar change; a script of the buddy's own that calls them
+    still counts."""
+
+    def test_sb_read_command_not_flagged_by_its_help_text(self, tmp_path, monkeypatch):
+        import tools.outbound_guard as guard
+        cli = tmp_path / "sb.py"
+        cli.write_text('"""\n    sb gcal add --title T\n    sb gcal delete <eventId>\n    sb facebook post\n"""\n')
+        monkeypatch.setattr(guard, "_PLATFORM_CLI", str(cli))
+        assert detect_outbound_command(f"python3 {cli} mail search x")[0] is False
+        assert detect_outbound_command(f"python3 {cli} gcal add --title x --date 2026-11-02")[1] == "outbound:calendar"
+
+    def test_own_script_calling_gcal_delete_is_flagged(self, tmp_path):
+        script = tmp_path / "tidy.py"
+        script.write_text(f"import subprocess\nsubprocess.run(['python3', '{SB}', 'gcal', 'delete', 'e1'])\n")
+        found, key, _ = detect_outbound_command(f"python3 {script}")
+        assert found and key == "outbound:calendar"
