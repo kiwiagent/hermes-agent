@@ -227,6 +227,20 @@ class TestCommandWithScriptFile:
 
         assert found and key == "outbound:email"
 
+    @pytest.mark.parametrize("template", [
+        'bash -c "python3 send.py"',
+        "sh -c 'cd . && python3 send.py'",
+        'env bash -c "python3 send.py"',
+    ])
+    def test_a_quoted_command_is_not_a_path_but_its_script_is_scanned(self, tmp_path, template):
+        # Quoting the *command* used to capture the whole string as a path, so
+        # the script inside it was never scanned (round 3).
+        (tmp_path / "send.py").write_text("import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
+
+        found, key, _ = detect_outbound_command(template, cwd=str(tmp_path))
+
+        assert found and key == "outbound:email"
+
     def test_plain_command_is_scanned(self, tmp_path):
         found, key, _ = detect_outbound_command(
             "curl -X POST https://api.example.com/x -d a=1", cwd=str(tmp_path))
@@ -648,9 +662,6 @@ mail.add_parser(
 '''
 
 
-CLEAN_SB_SOURCE = '''"""SmartBuddy's platform CLI."""\nimport argparse\n'''
-
-
 class TestInstalledCliOwnSourceNeverAsks:
     def _install(self, tmp_path, monkeypatch, source=OLD_SB_SOURCE):
         import tools.outbound_guard as guard
@@ -664,8 +675,9 @@ class TestInstalledCliOwnSourceNeverAsks:
     @pytest.mark.parametrize("args", [
         "calendar",
         "mail accounts",
+        "mail search from:school",
         "mail password",
-        "files list",
+        "trails near",
         "whoami",
     ])
     def test_running_the_installed_cli_never_asks(self, tmp_path, monkeypatch, args):
@@ -699,22 +711,31 @@ class TestInstalledCliOwnSourceNeverAsks:
         found, key, _ = detect_outbound_command(f"python3 {helper}")
         assert found and key == "outbound:email"
 
-    def test_mail_write_through_the_cli_still_asks(self, tmp_path, monkeypatch):
-        # Clean CLI source, so only the new command-line rule can find this.
-        cli = self._install(tmp_path, monkeypatch, source=CLEAN_SB_SOURCE)
-        found, key, _ = detect_outbound_command(f"python3 {cli} mail send -a me@x.co")
-        assert found and key == "outbound:email"
-
     def test_copy_of_the_cli_source_elsewhere_still_asks(self, tmp_path, monkeypatch):
         # The exemption is file identity: the same text at another path is the
-        # buddy's own code.
+        # buddy's own code, judged on what it really does (not on its help
+        # text, which the exemption is there to ignore).
         self._install(tmp_path, monkeypatch)
         copy = tmp_path / "copied_cli.py"
-        copy.write_text(OLD_SB_SOURCE)
-        assert detect_outbound_command(f"python3 {copy}")[0] is True
+        copy.write_text(OLD_SB_SOURCE + "import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
+        found, key, _ = detect_outbound_command(f"python3 {copy}")
+        assert found and key == "outbound:email"
 
-    def test_description_string_in_own_script_is_not_a_send(self):
-        text = 'mail.add_parser("setup", help="himalaya config for every connected mailbox")'
+    @pytest.mark.parametrize("text", [
+        'mail.add_parser("setup", help="himalaya config for every connected mailbox")',
+        'ArgumentParser(prog="himalaya")',
+        'table.add_row("x", description="himalaya login")',
+        'table.add_row(name="x", usage="himalaya login")',
+    ])
+    def test_a_label_naming_the_mail_client_is_not_a_send(self, text):
         assert detect_outbound_action(text)[0] is False
-        assert detect_outbound_action('ArgumentParser(prog="himalaya")')[0] is False
-        assert detect_outbound_action('client="himalaya"\nclient.message.send()')[1] == "outbound:email"
+
+    @pytest.mark.parametrize("text", [
+        'usage="himalaya"\nsubprocess.run([usage, "message", "send"])',
+        'epilog = "himalaya"\nsend_mail(epilog)',
+        'help = "himalaya"\nhelp.send()',
+        'client="himalaya"\nclient.message.send()',
+    ])
+    def test_a_real_assignment_naming_the_mail_client_still_asks(self, text):
+        found, key, _ = detect_outbound_action(text)
+        assert found and key == "outbound:email"

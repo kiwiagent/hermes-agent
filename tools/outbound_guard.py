@@ -46,19 +46,33 @@ _EMAIL_PATTERNS = [
     # kiwiagent (security review 2026-10-27): the same with the subcommand
     # split by quotes ('mess''age' send), or himalaya hidden in a variable.
     r"""\bhimalaya\b[^\n;|&]*?(?:mess|msg|templ|tpl)['"a-z]*[\s,]+['"]?(?:send|write|compose|reply|forward|fwd)\b""",
-    # The platform CLI's mail writes (kiwiagent 2026-10-28): the installed
-    # CLI's own source is exempt from the scan (see _is_platform_cli), so a
-    # send asked for through the CLI has to show on the command line.
-    # `mail unsubscribe` is deliberately not here: the plugin's own contract
-    # test (smartbuddy-hermes-plugin tests/test_sb_cli.py) has that one run
-    # without a card, so changing it is a plugin-side decision first.
-    _SB + r"""mail['"]?[\s,'"]+(?:send|write|compose|reply|forward|fwd)\b""",
-    # ...but not with a description keyword: an argparse
-    # ``help="himalaya config for every connected mailbox"`` (or a
-    # description/metavar/usage/prog string) documents the mail client for a
-    # human; it is not a hidden way to send through it.
-    r"""\b(?!help\s*=|description\s*=|metavar\s*=|dest\s*=|usage\s*=|epilog\s*=|prog\s*=)[a-z_]\w*=['"]?himalaya\b""",
+    # The installed CLI's own source is exempt from the scan (see
+    # _is_platform_cli), so a mail-send subcommand would have to show on the
+    # command line; the shipped CLI has none (mail goes out through himalaya
+    # above, and its `mail unsubscribe` is cardless by the plugin's contract
+    # test in smartbuddy-hermes-plugin tests/test_sb_cli.py). Add a rule here
+    # when a send subcommand ships.
 ]
+
+# himalaya hidden in a variable: ``client = "himalaya"`` then
+# ``client.message.send()`` is a send. A keyword argument that only *labels*
+# the client for a human is not — an argparse
+# ``help="himalaya config for every connected mailbox"`` was the 2026-10-28
+# card that showed on every SmartBuddy turn, and ``usage=``/``prog=`` etc. read
+# the same way. Position matters, not the name: a plain
+# ``usage = "himalaya"`` assignment still counts.
+_HIMALAYA_VAR_RE = re.compile(r"""\b([a-z_]\w*)\s*=\s*['"]?himalaya\b""", _FLAGS)
+_LABEL_KWARGS = frozenset(
+    {"help", "description", "metavar", "dest", "usage", "epilog", "prog"})
+
+
+def _himalaya_hidden_in_a_variable(text: str) -> bool:
+    for m in _HIMALAYA_VAR_RE.finditer(text):
+        if (m.group(1) in _LABEL_KWARGS
+                and text[:m.start()].rstrip().endswith(("(", "[", ","))):
+            continue
+        return True
+    return False
 
 _MESSAGE_PATTERNS = [
     r"\btwilio\b",
@@ -414,11 +428,15 @@ def _notion_read_only(text: str) -> bool:
 
 # `python3 x.py`, `bash -e run.sh`, `node a.js`, `./send.sh` — and the same
 # with the path quoted (`python3 "my script.py"`), which used to skip the scan.
+# A quoted *path* may hold spaces; a quoted *command* (`bash -c "python3
+# send.py"`) is not a path — its inner path is found by the bare branch, the
+# way it was before quoting was handled.
 _SCRIPT_EXT = r"\.(?:py|sh|bash|js|mjs|cjs|jsx|tsx|mts|cts|ts|rb|pl)"
 _SCRIPT_RUN_RE = re.compile(
     r"(?:^|[\s;|&(])(?:(?:python[\d.]*|bash|sh|zsh|node|ruby|perl)\s+(?:-\S+\s+)*)?"
-    r"""(?:['"]([^'"]+""" + _SCRIPT_EXT + r""")['"]"""
-    r"""|((?:\.{0,2}/)?[\w./~-]+""" + _SCRIPT_EXT + r""")(?![\w.]))"""
+    r"""(?:['"]((?!(?:python[\d.]*|bash|sh|zsh|node|ruby|perl|env|sudo|cd)\b)"""
+    r"""[^'"\n;&|]+""" + _SCRIPT_EXT + r""")['"]"""
+    r"""|(?:((?:\.{0,2}/)?[\w./~-]+""" + _SCRIPT_EXT + r""")(?![\w.])))"""
 )
 _MAX_SCRIPT_BYTES = 256 * 1024
 
@@ -468,7 +486,7 @@ def detect_outbound_action(text: str, *, platform_cli_source: bool = False) -> O
     """
     if not text or platform_cli_source:
         return _NONE
-    if _any(_EMAIL_RE, text):
+    if _any(_EMAIL_RE, text) or _himalaya_hidden_in_a_variable(text):
         return True, "outbound:email", "send an email"
     if _any(_MESSAGE_RE, text):
         return True, "outbound:message", "send a message to someone"
