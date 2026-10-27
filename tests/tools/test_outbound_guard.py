@@ -754,6 +754,8 @@ class TestInstalledCliOwnSourceNeverAsks:
         'ArgumentParser(prog="himalaya")',
         'table.add_row("x", description="himalaya login")',
         'table.add_row(name="x", usage="himalaya login")',
+        'dict(help="himalaya config")',
+        'mail.add_parser(\n    "setup",\n    help="himalaya config",\n)',
     ])
     def test_a_label_naming_the_mail_client_is_not_a_send(self, text):
         assert detect_outbound_action(text)[0] is False
