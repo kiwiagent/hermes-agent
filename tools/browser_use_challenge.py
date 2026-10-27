@@ -59,14 +59,14 @@ def release_challenged_browser(cmd, env, task_id, session, sidecar, *, fenced=Fa
 
 def _close_private_route(key, env, *, fenced):
     from tools import browser_use_cli as bu
-    from tools.browser_tool_lifecycle import cleanup_browser, _human_holds_shared_browser
+    from tools.browser_tool_lifecycle import cleanup_browser_session, _human_holds_shared_browser
     from tools.bot_desktop import lease
 
     def close():
         # Revalidate after the possibly slow harness reload.
         if _human_holds_shared_browser(key):
             return False
-        cleanup_browser(key)
+        cleanup_browser_session(key)
         with bu._driven_daemons_lock:
             bu._driven_daemons.discard(env.get("BU_NAME", "default"))
         return True

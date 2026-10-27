@@ -25,7 +25,7 @@ def owned_browser(monkeypatch):
         env[bu._PRIVATE_BROWSER_SENTINEL] = '1'
     monkeypatch.setattr(bu, '_route_backend', route)
     cleaned = Mock()
-    monkeypatch.setattr(lifecycle, 'cleanup_browser', cleaned)
+    monkeypatch.setattr(lifecycle, 'cleanup_browser_session', cleaned)
     return cleaned
 
 
@@ -111,7 +111,7 @@ def test_destructive_close_excludes_human_ownership_transition(monkeypatch, owne
                 blocked.append(True)
             else:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    monkeypatch.setattr(lifecycle, 'cleanup_browser', cleanup)
+    monkeypatch.setattr(lifecycle, 'cleanup_browser_session', cleanup)
     monkeypatch.setattr(bu, '_run_cli_killing_process_group', lambda *args: subprocess.CompletedProcess(args[0], 0, '', ''))
     result = release_challenged_browser(['fake-browser'], {}, 'research', '', False, fenced=True)
     assert result['browser_released'] is True
