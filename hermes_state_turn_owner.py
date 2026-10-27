@@ -4,11 +4,12 @@ The SQLite TTL remains the fallback for old holders and unavailable lock files.
 An unlocked proof file, unlike a foreign PID, proves that the owner is gone.
 """
 
-import os
 from pathlib import Path
 import re
 import uuid
 import logging
+
+from hermes_platform.host.facts import os_family
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ _OWNER_TOKEN = re.compile(r"(?:^|:)owner=([0-9a-f]{32})(?::|$)")
 
 def _lock(handle):
     handle.seek(0)
-    if os.name == "nt":
+    if os_family() == "win32":
         import msvcrt
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     else:
