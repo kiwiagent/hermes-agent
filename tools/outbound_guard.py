@@ -48,6 +48,23 @@ _MESSAGE_PATTERNS = [
     r"graph\.facebook\.com/\S*/messages",
 ]
 
+# SmartBuddy's platform CLI (kiwiagent 2026-10-27): its writes go to an
+# internal address, so the HTTP rules let them through — judged by subcommand
+# instead. Also matched as a subprocess argument list. Reads don't match.
+_SB = r"""\bsb(?:\.py)?['"]?[\s,'"]+"""
+_CALENDAR_PATTERNS = [
+    _SB + r"""gcal['"]?[\s,'"]+(?:add|change|delete)\b""",
+]
+# Posting on / deleting from the user's Facebook Page. Boosts are created
+# paused (the user starts them in the app), so preparing one isn't here.
+_PUBLISH_CLI_PATTERNS = [
+    _SB + r"""facebook['"]?[\s,'"]+(?:post|delete)\b""",
+]
+
+# The platform CLI as installed: reading its source (help text names every
+# subcommand) must not count as running them.
+_PLATFORM_CLI = "/opt/hermes/plugins/platforms/smartbuddy/sb.py"
+
 _HTTP_WRITE_PATTERNS = [
     r"\bcurl\b[^\n;|]*?(?:-X\s*|--request[\s=]+)['\"]?(?:POST|PUT|PATCH|DELETE)\b",
     r"\bcurl\b[^\n;|]*?\s(?:-d|--data(?:-raw|-binary|-urlencode)?|-F|--form|--json|-T|--upload-file)(?=[\s=@'\"])",
@@ -67,6 +84,8 @@ _HTTP_WRITE_PATTERNS = [
 _EMAIL_RE = [re.compile(p, _FLAGS) for p in _EMAIL_PATTERNS]
 _MESSAGE_RE = [re.compile(p, _FLAGS) for p in _MESSAGE_PATTERNS]
 _HTTP_WRITE_RE = [re.compile(p, _FLAGS) for p in _HTTP_WRITE_PATTERNS]
+_CALENDAR_RE = [re.compile(p, _FLAGS) for p in _CALENDAR_PATTERNS]
+_PUBLISH_CLI_RE = [re.compile(p, _FLAGS) for p in _PUBLISH_CLI_PATTERNS]
 
 _URL_HOST_RE = re.compile(r"https?://(?:[^/\s'\"`@]*@)?([^/\s'\"`:)]+)", re.IGNORECASE)
 # A host that may be always-allowed: a plain DNS name, not a template.
@@ -400,11 +419,13 @@ def _without_curl_get_reads(text: str) -> str:
     return "".join(parts)
 
 
-def detect_outbound_action(text: str) -> OutboundMatch:
+def detect_outbound_action(text: str, *, platform_cli_source: bool = False) -> OutboundMatch:
     """Return (found, key, description) for an outbound action in ``text``.
 
     ``description`` is plain English for the approval prompt ("send an
     email"); the SmartBuddy plugin renders it in the user's language.
+    ``platform_cli_source``: ``text`` is sb.py itself, whose help text names
+    its subcommands — those count only on a command line or in other code.
     """
     if not text:
         return _NONE
@@ -412,6 +433,11 @@ def detect_outbound_action(text: str) -> OutboundMatch:
         return True, "outbound:email", "send an email"
     if _any(_MESSAGE_RE, text):
         return True, "outbound:message", "send a message to someone"
+    if not platform_cli_source:
+        if _any(_PUBLISH_CLI_RE, text):
+            return True, "outbound:publish", "post on Facebook"
+        if _any(_CALENDAR_RE, text):
+            return True, "outbound:calendar", "change your calendar"
     text = _without_curl_get_reads(text)
     if _any(_HTTP_WRITE_RE, text):
         hosts = [h.lower() for h in _URL_HOST_RE.findall(text)]
@@ -492,12 +518,13 @@ def detect_outbound_command(command: str, cwd: Optional[str] = None) -> Outbound
     for raw in _script_paths(command):
         content = _read_script(raw, cwd)
         if content:
-            matches.append(detect_outbound_action(content))
+            cli = os.path.normpath(os.path.expanduser(raw)) == os.path.normpath(_PLATFORM_CLI)
+            matches.append(detect_outbound_action(content, platform_cli_source=cli))
     matches = [m for m in matches if m[0]]
     if not matches:
         return _NONE
     # The strictest wins; a host key holds only if every part agrees on it.
-    for key in ("outbound:email", "outbound:message", "outbound:publish"):
+    for key in ("outbound:email", "outbound:message", "outbound:publish", "outbound:calendar"):
         for m in matches:
             if m[1] == key:
                 return m
