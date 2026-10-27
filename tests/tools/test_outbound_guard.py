@@ -599,3 +599,85 @@ class TestPlatformCliSource:
         script.write_text(f"import subprocess\nsubprocess.run(['python3', '{SB}', 'gcal', 'delete', 'e1'])\n")
         found, key, _ = detect_outbound_command(f"python3 {script}")
         assert found and key == "outbound:calendar"
+
+
+# The installed CLI's own source (bug 2026-10-28): every SmartBuddy turn runs
+# `python3 .../sb.py …`, and the command scan reads the file it runs. An
+# argparse help string mentioning the mail client ("himalaya config for every
+# connected mailbox") was read as a hidden way to send email, so *every*
+# question raised an "Allow your buddy to do this? send an email" card — and
+# email is never always-allowable, so the user could not stop it.
+OLD_SB_SOURCE = '''"""SmartBuddy's platform CLI.
+
+    sb mail setup                 (himalaya config for every connected mailbox)
+    sb gcal add --title T --date D
+    sb facebook post --message hi
+"""
+import argparse
+
+parser = argparse.ArgumentParser()
+sub = parser.add_subparsers()
+mail = sub.add_parser("mail")
+mail.add_parser(
+    "setup",
+    help="himalaya config for every connected mailbox (run before using himalaya)",
+)
+'''
+
+
+class TestInstalledCliOwnSourceNeverAsks:
+    def _install(self, tmp_path, monkeypatch):
+        import tools.outbound_guard as guard
+        plugins = tmp_path / "platforms" / "smartbuddy"
+        plugins.mkdir(parents=True, exist_ok=True)
+        cli = plugins / "sb.py"
+        cli.write_text(OLD_SB_SOURCE)
+        monkeypatch.setattr(guard, "_PLATFORM_CLI", str(cli))
+        return cli
+
+    @pytest.mark.parametrize("args", [
+        "calendar",
+        "mail accounts",
+        "mail password",
+        "files list",
+        "whoami",
+    ])
+    def test_running_the_installed_cli_never_asks(self, tmp_path, monkeypatch, args):
+        # Reads only: a write on this command line (gcal add, facebook post)
+        # is still an action — see TestPlatformCliSource / TestPublishCli.
+        cli = self._install(tmp_path, monkeypatch)
+        assert detect_outbound_command(f"python3 {cli} {args}")[0] is False
+
+    def test_same_cli_through_a_symlink_or_relative_path_never_asks(self, tmp_path, monkeypatch):
+        cli = self._install(tmp_path, monkeypatch)
+        link = tmp_path / "bin" / "sb.py"
+        link.parent.mkdir()
+        link.symlink_to(cli)
+        assert detect_outbound_command(f"python3 {link} calendar")[0] is False
+        assert detect_outbound_command("python3 sb.py calendar", cwd=str(cli.parent))[0] is False
+
+    def test_plugin_module_beside_the_cli_never_asks(self, tmp_path, monkeypatch):
+        cli = self._install(tmp_path, monkeypatch)
+        helper = cli.parent / "area.py"
+        helper.write_text('TEMPLATE = "himalaya message send -a me@x.co"\n')
+        assert detect_outbound_command(f"python3 {helper}")[0] is False
+
+    def test_cron_scanning_the_cli_never_asks(self, tmp_path, monkeypatch):
+        from tools.outbound_guard import detect_outbound_script_file
+        cli = self._install(tmp_path, monkeypatch)
+        assert detect_outbound_script_file(str(cli))[0] is False
+
+    def test_description_string_in_own_script_is_not_a_send(self):
+        text = 'mail.add_parser("setup", help="himalaya config for every connected mailbox")'
+        assert detect_outbound_action(text)[0] is False
+        assert detect_outbound_action('client="himalaya"\nclient.message.send()')[1] == "outbound:email"
+
+    def test_own_script_really_sending_still_asks(self, tmp_path):
+        script = tmp_path / "send_note.py"
+        script.write_text(
+            'import subprocess\n'
+            'subprocess.run(["himalaya", "message", "compose", "-a", "me@x.co", "--send"])\n'
+        )
+        found, key, _ = detect_outbound_command(f"python3 {script}")
+        assert found and key == "outbound:email"
+
