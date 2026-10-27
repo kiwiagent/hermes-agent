@@ -64,15 +64,34 @@ _EMAIL_PATTERNS = [
 _HIMALAYA_VAR_RE = re.compile(r"""\b([a-z_]\w*)\s*=\s*['"]?himalaya\b""", _FLAGS)
 _LABEL_KWARGS = frozenset(
     {"help", "description", "metavar", "dest", "usage", "epilog", "prog"})
+_STRING_LITERAL_RE = re.compile(r"""(["'])(?:\\.|(?!\1)[^\\])*\1""")
+_COMMENT_RE = re.compile(r"#[^\n]*")
+
+
+def _is_label_kwarg(text: str, start: int) -> bool:
+    """True when the assignment at ``start`` is a call's keyword argument.
+
+    Only an *open* bracket on the line makes a label; the same name assigned
+    on its own line (``usage = "himalaya"``, then handed to the mail client)
+    is still a send. Strings and comments are dropped first, so a comma at the
+    end of a comment cannot pass for an argument separator."""
+    prefix = _COMMENT_RE.sub("", _STRING_LITERAL_RE.sub("", text[:start]))
+    depth = 0
+    for ch in prefix:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+    return depth > 0 and prefix.rstrip().endswith((",", "(", "["))
 
 
 def _himalaya_hidden_in_a_variable(text: str) -> bool:
     for m in _HIMALAYA_VAR_RE.finditer(text):
-        if (m.group(1) in _LABEL_KWARGS
-                and text[:m.start()].rstrip().endswith(("(", "[", ","))):
+        if m.group(1) in _LABEL_KWARGS and _is_label_kwarg(text, m.start()):
             continue
         return True
     return False
+
 
 _MESSAGE_PATTERNS = [
     r"\btwilio\b",
@@ -426,18 +445,17 @@ def _notion_read_only(text: str) -> bool:
     return True
 
 
-# `python3 x.py`, `bash -e run.sh`, `node a.js`, `./send.sh` — and the same
-# with the path quoted (`python3 "my script.py"`), which used to skip the scan.
-# A quoted *path* may hold spaces; a quoted *command* (`bash -c "python3
-# send.py"`) is not a path — its inner path is found by the bare branch, the
-# way it was before quoting was handled.
+# `python3 x.py`, `bash -e run.sh`, `node a.js`, `./send.sh` — also as a
+# subprocess argument list.
 _SCRIPT_EXT = r"\.(?:py|sh|bash|js|mjs|cjs|jsx|tsx|mts|cts|ts|rb|pl)"
 _SCRIPT_RUN_RE = re.compile(
     r"(?:^|[\s;|&(])(?:(?:python[\d.]*|bash|sh|zsh|node|ruby|perl)\s+(?:-\S+\s+)*)?"
-    r"""(?:['"]((?!(?:python[\d.]*|bash|sh|zsh|node|ruby|perl|env|sudo|cd)\b)"""
-    r"""[^'"\n;&|]+""" + _SCRIPT_EXT + r""")['"]"""
-    r"""|(?:((?:\.{0,2}/)?[\w./~-]+""" + _SCRIPT_EXT + r""")(?![\w.])))"""
+    r"""((?:\.{0,2}/)?[\w./~-]+""" + _SCRIPT_EXT + r""")\b"""
 )
+# The same with the path quoted (`python3 "my script.py"`), which used to skip
+# the scan. A quoted *command* (`bash -c "python3 send.py"`) matches here too,
+# but it names no file; the pass above finds the script inside it.
+_SCRIPT_QUOTED_RE = re.compile(r"""['"]([^'"\n]+""" + _SCRIPT_EXT + r""")['"]""")
 _MAX_SCRIPT_BYTES = 256 * 1024
 
 OutboundMatch = Tuple[bool, Optional[str], Optional[str]]
@@ -539,10 +557,9 @@ def allowable_http_host(key: Optional[str]) -> Optional[str]:
 
 
 def _script_paths(command: str) -> list[str]:
-    paths = []
-    for m in _SCRIPT_RUN_RE.finditer(command):
-        paths.append(m.group(1) or m.group(2))
-    return paths
+    paths = [m.group(1) for m in _SCRIPT_RUN_RE.finditer(command)]
+    paths += [m.group(1) for m in _SCRIPT_QUOTED_RE.finditer(command)]
+    return list(dict.fromkeys(paths))
 
 
 def _read_script(raw: str, cwd: Optional[str]) -> Optional[Tuple[str, str]]:

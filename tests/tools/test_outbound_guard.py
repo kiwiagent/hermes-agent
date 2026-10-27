@@ -231,13 +231,33 @@ class TestCommandWithScriptFile:
         'bash -c "python3 send.py"',
         "sh -c 'cd . && python3 send.py'",
         'env bash -c "python3 send.py"',
+        'bash -c "timeout 30 python3 send.py"',
+        'bash -c "exec send.py"',
+        'sh -c "nice send.py"',
+        'bash -c "FOO=1 python3 send.py"',
+        'bash -c "/usr/bin/python3 send.py"',
+        'sh -c "PYTHONPATH=. python3 send.py"',
+        'sh -c "stdbuf -oL python3 send.py"',
     ])
     def test_a_quoted_command_is_not_a_path_but_its_script_is_scanned(self, tmp_path, template):
         # Quoting the *command* used to capture the whole string as a path, so
-        # the script inside it was never scanned (round 3).
+        # the script inside it was never scanned (rounds 3 and 4): wrappers and
+        # absolute interpreters must not swallow it.
         (tmp_path / "send.py").write_text("import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
 
         found, key, _ = detect_outbound_command(template, cwd=str(tmp_path))
+
+        assert found and key == "outbound:email"
+
+    @pytest.mark.parametrize("template", ['python3 "{path}"', "python3 '{path}'"])
+    def test_a_quoted_path_starting_with_a_command_word_is_still_scanned(self, tmp_path, template):
+        # `env/` is a plausible virtualenv directory; a path is a path however
+        # its first segment is spelled.
+        (tmp_path / "env").mkdir()
+        (tmp_path / "env" / "send.py").write_text("import smtplib\nsmtplib.SMTP('x')\n")
+
+        found, key, _ = detect_outbound_command(
+            template.format(path=tmp_path / "env" / "send.py"))
 
         assert found and key == "outbound:email"
 
@@ -677,6 +697,7 @@ class TestInstalledCliOwnSourceNeverAsks:
         "mail accounts",
         "mail search from:school",
         "mail password",
+        "mail unsubscribe news@x.co",
         "trails near",
         "whoami",
     ])
@@ -735,6 +756,10 @@ class TestInstalledCliOwnSourceNeverAsks:
         'epilog = "himalaya"\nsend_mail(epilog)',
         'help = "himalaya"\nhelp.send()',
         'client="himalaya"\nclient.message.send()',
+        # A comma or an open bracket left over from an earlier line does not
+        # make the next line a keyword argument (round 4).
+        'x = 1,\nusage="himalaya"\nsubprocess.run([usage, "message", "send"])',
+        '# list the mail hosts,\nusage="himalaya"\nsubprocess.run([usage, "send"])',
     ])
     def test_a_real_assignment_naming_the_mail_client_still_asks(self, text):
         found, key, _ = detect_outbound_action(text)
