@@ -59,11 +59,14 @@ _EMAIL_PATTERNS = [
 # the client for a human is not — an argparse
 # ``help="himalaya config for every connected mailbox"`` was the 2026-10-28
 # card that showed on every SmartBuddy turn, and ``usage=``/``prog=`` etc. read
-# the same way. Position matters, not the name: a plain
-# ``usage = "himalaya"`` assignment still counts, and an attribute
-# (``parser.description = …``) is not a keyword argument at all.
-_HIMALAYA_VAR_RE = re.compile(
-    r"""(?<![.\w])([a-z_]\w*)\s*=\s*['"]?himalaya\b""", _FLAGS)
+# the same way. Position gates first, then the name: an assignment in a call's
+# argument list with a label name is a label, and a signature default is not an
+# argument. Everything else counts, with or without spaces around ``=`` — but
+# spaces are only read for a plain name, because ``parser.description = …`` is
+# prose about the client, while a bare ``cfg.client=…`` is the old base reading.
+_HIMALAYA_VAR_RE = re.compile(r"""(?<!\w)([a-z_]\w*)=['"]?himalaya\b""", _FLAGS)
+_HIMALAYA_SPACED_VAR_RE = re.compile(
+    r"""(?<!\.)(?<!\w)([a-z_]\w*)\s*=\s*['"]?himalaya\b""", _FLAGS)
 _LABEL_KWARGS = frozenset(
     {"help", "description", "metavar", "dest", "usage", "epilog", "prog"})
 _STRING_LITERAL_RE = re.compile(r"""(["'])(?:\\.|(?!\1)[^\\])*\1""")
@@ -75,13 +78,13 @@ _SIGNATURE_RE = re.compile(r"\b(?:def|class)\s+\w+\s*$")
 def _is_label_kwarg(text: str, start: int) -> bool:
     """True when the assignment at ``start`` is a call's keyword argument.
 
-    Only an open bracket that is still waiting for its first argument makes a
-    label; the same name assigned on its own line (``usage = "himalaya"``,
-    then handed to the mail client) is still a send. A signature's default
-    (``def send(prog="himalaya")``) is not an argument either: the ``def``
-    opens a bracket, but the name is then used to send. Strings and comments
-    are dropped first, so a comma at the end of a comment cannot pass for an
-    argument separator."""
+    An argument boundary — ``(``, ``[`` or ``,`` before it inside an open
+    bracket — makes a label; the same name assigned on its own line
+    (``usage = "himalaya"``, then handed to the mail client) is still a send.
+    A signature's default (``def send(prog="himalaya")``) is not an argument
+    either: the ``def`` opens a bracket, but the name is then used to send.
+    Strings and comments are dropped first, so a comma at the end of a comment
+    cannot pass for an argument separator."""
     prefix = _COMMENT_RE.sub("", _TRIPLE_STRING_RE.sub("", text[:start]))
     prefix = _STRING_LITERAL_RE.sub("", prefix)
     openers = []
@@ -97,11 +100,12 @@ def _is_label_kwarg(text: str, start: int) -> bool:
 
 
 def _himalaya_hidden_in_a_variable(text: str) -> bool:
-    for m in _HIMALAYA_VAR_RE.finditer(text):
-        if (m.group(1).lower() in _LABEL_KWARGS
-                and _is_label_kwarg(text, m.start())):
-            continue
-        return True
+    for pattern in (_HIMALAYA_VAR_RE, _HIMALAYA_SPACED_VAR_RE):
+        for m in pattern.finditer(text):
+            if (m.group(1).lower() in _LABEL_KWARGS
+                    and _is_label_kwarg(text, m.start())):
+                continue
+            return True
     return False
 
 
@@ -593,7 +597,7 @@ def _read_script(raw: str, cwd: Optional[str]) -> Optional[Tuple[str, str]]:
     for path in candidates:
         try:
             if path.is_file():
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
                     return os.path.realpath(str(path)), f.read(_MAX_SCRIPT_BYTES)
         except OSError:
             continue
@@ -625,12 +629,17 @@ def detect_outbound_command(command: str, cwd: Optional[str] = None) -> Outbound
 
 
 def detect_outbound_script_file(path: str) -> OutboundMatch:
-    """Scan one script file (cron jobs run their scripts directly)."""
+    """Scan one script file that is run directly, not through a command line.
+
+    Cron jobs pass their script text to the guard themselves, so nothing in
+    this repository calls this function; it is here for hosts that run a file
+    by path. The platform CLI's own file is exempt, like everywhere else."""
     script = _read_script(path, None)
     if not script:
         return _NONE
-    _, source = script
-    return detect_outbound_action(source)
+    resolved, source = script
+    return detect_outbound_action(
+        source, platform_cli_source=_is_platform_cli(resolved))
 
 
 __all__ = [

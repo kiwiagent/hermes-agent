@@ -12,6 +12,7 @@ from tools.outbound_guard import (
     allowable_http_host,
     detect_outbound_action,
     detect_outbound_command,
+    detect_outbound_script_file,
 )
 
 
@@ -742,6 +743,12 @@ class TestInstalledCliOwnSourceNeverAsks:
         found, key, _ = detect_outbound_command(f"python3 {copy}")
         assert found and key == "outbound:email"
 
+    def test_scanning_the_installed_cli_by_path_never_asks(self, tmp_path, monkeypatch):
+        # A host that runs a file by path goes through this entry point, and it
+        # exempts the same file identity as the command-line scan.
+        cli = self._install(tmp_path, monkeypatch)
+        assert detect_outbound_script_file(str(cli))[0] is False
+
     @pytest.mark.parametrize("text", [
         'mail.add_parser("setup", help="himalaya config for every connected mailbox")',
         'ArgumentParser(prog="himalaya")',
@@ -756,6 +763,11 @@ class TestInstalledCliOwnSourceNeverAsks:
         'epilog = "himalaya"\nsend_mail(epilog)',
         'help = "himalaya"\nhelp.send()',
         'client="himalaya"\nclient.message.send()',
+        # An attribute that holds the client is a real configuration, not a
+        # label — base caught the bare form and still must (round 6).
+        'cfg.client="himalaya"\nsubprocess.run([cfg.client, "message", "send"])',
+        'self.mail="himalaya"\nsubprocess.run([self.mail, "message", "send"])',
+        'x.y.client="himalaya"\nrun([x.y.client, "message", "send"])',
         # A comma or an open bracket left over from an earlier line does not
         # make the next line a keyword argument (round 4).
         'x = 1,\nusage="himalaya"\nsubprocess.run([usage, "message", "send"])',
@@ -777,11 +789,14 @@ class TestInstalledCliOwnSourceNeverAsks:
         found, key, _ = detect_outbound_action(text)
         assert found and key == "outbound:email"
 
-    def test_an_attribute_assignment_is_not_a_label(self):
-        # Only a keyword argument is a label: `parser.description = ...` is an
-        # attribute write, not a label (round 5).
+    def test_a_label_named_attribute_write_is_not_a_send(self):
+        # `parser.description = ...` is prose about the client, so the spaced
+        # form stays silent — but the bare form keeps base's reading of an
+        # attribute that may hold the client itself (see the assignment test).
         assert detect_outbound_action(
             'parser.description = "himalaya login"')[0] is False
+        assert detect_outbound_action(
+            'parser.description="himalaya login"')[0] is True
 
     def test_a_docstring_quote_does_not_hide_a_label(self):
         # A `"` inside a docstring used to end the scrub early and leave the
