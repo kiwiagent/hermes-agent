@@ -105,6 +105,10 @@ _RM_FLAG_PREFIX = _CMDPOS + r'rm\s+(-[^\s]*\s+)*'
 _PKG_OPTS = r'(?:-[^\s]+(?:\s+[^-\s][^\s]*)?\s+)*'
 
 HARDLINE_PATTERNS = [
+    # kiwiagent (security review 2026-10-27): the mailbox app password is
+    # himalaya's — it runs `sb.py mail password` from its own config, never
+    # through here. The buddy reading it can only be an injection exfiltrating it.
+    (r"""\bsb(?:\.py)?['"]?[\s,'"]+mail['"]?[\s,'"]+password\b""", "read a mailbox password (only the mail app may)"),
     # Root path: any root-anchored path whose components collapse to "/" in the shell ("/", "//",
     # "/.", "/./", "/../..", optional trailing glob). Each inter-slash segment must be exactly "."
     # or "..", so "/tmp", "/.ssh", even "/..." are literal dirs that fall through to the softer
@@ -465,6 +469,32 @@ DANGEROUS_PATTERNS = [
     # secret variables, needs the user's OK. Input is lower-cased here; the
     # user's own tokens ($NOTION_TOKEN …) and other /proc reads are untouched.
     (r'/proc/[^\s/]+/environ\b', "read a process environment (may hold secrets)"),
+    # kiwiagent (security review 2026-10-27): ways round the rules above, and
+    # ways to send data out that the outbound guard can't see — each one an
+    # injection could talk the buddy into. Everyday lookups stay unasked.
+    (r'/proc/\S*env', "read a process environment (may hold secrets)"),
+    (r'(?:^|[\s<"\'])environ\b', "read a process environment (may hold secrets)"),
+    (r'(?:^|[;&|(\n])\s*env\s*(?:$|[;&|>)\n])', "list every environment variable (may hold secrets)"),
+    (r'(?:^|[;&|(\n])\s*(?:printenv|export\s+-p|declare\s+-x)\b', "list environment variables (may hold secrets)"),
+    (r'/opt/data/config\.ya?ml\b', "read the buddy's configuration (holds its AI key)"),
+    (r'(?:^|[\s/"\'=])\.env\b', "read a .env file (may hold secrets)"),
+    (r'^(?=[\s\S]*\b(?:curl|wget|nc|ncat|netcat|socat|nslookup|dig|host|ping)\b)(?=[\s\S]*(?:\$\(|`))',
+     "send the output of another command over the network"),
+    (r'(?:^|[\s;|&(])(?:nc|ncat|netcat|socat|telnet)\s', "open a raw network connection"),
+    (r'/dev/(?:tcp|udp)/', "open a raw network connection"),
+    # A GET carrying a local file (-G turns -d into the query string): POSTs
+    # with -d are already the outbound guard's.
+    (r'\bcurl\b[^\n;|&]*?\s(?:-[a-z]*g[a-z]*|--get)\b[^\n;|&]*?(?:--data[a-z-]*|-d)[\s=]+["\']?[^\s"\']*@',
+     "send a local file's contents to a website"),
+    (r'\bcurl\b[^\n;|&]*?(?:--data[a-z-]*|-d)[\s=]+["\']?[^\s"\']*@[^\n;|&]*?\s(?:-[a-z]*g[a-z]*|--get)\b',
+     "send a local file's contents to a website"),
+    (r'\bcurl\b[^\n;|&]*?\s(?:--config\b|-k\s+[/~.])', "run curl from a config file"),
+    (r'\bgit\s+push\b[^\n;|&]*\s(?:https?://|git@|ssh://)', "push files to another server"),
+    (r"""\b[a-z_][a-z0-9_]*=["']?(?:curl|wget|nc|ncat|himalaya|python3?|bash|sh|node)\b["']?\s*[;&\n]""",
+     "run a command hidden in a variable"),
+    (r'\bcrontab\b', "change the system's scheduled jobs (crontab)"),
+    (r'\beval\b[^\n;|&]*(?:\$\(|`)', "run generated code"),
+    (r'\bbase64\s+(?:-d|--decode)\b[^\n]*\|\s*(?:[/\w]*/)?(?:sh|bash|zsh|dash|eval)\b', "run decoded code"),
     (r'\b(?:smartbuddy|litellm)_[a-z0-9_]*(?:secret|key|token)\b', "read a platform secret"),
     # Sudo stdin/askpass/shell/list-privs flags. The agent has no TTY, so sudo invocations that succeed
     # non-interactively read the password from stdin (-S) or askpass (-A); -s (shell) and -a (list) are gated as
