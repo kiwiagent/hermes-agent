@@ -81,3 +81,38 @@ def test_human_control_prevents_challenge_cleanup(monkeypatch, owned_browser):
     assert result['error_type'] == 'bot_challenge'
     assert result['browser_released'] is False
     owned_browser.assert_not_called()
+
+
+def test_human_takeover_during_reload_prevents_teardown(monkeypatch, owned_browser):
+    human = [False]
+    monkeypatch.setattr(lifecycle, '_human_holds_shared_browser', lambda key: human[0])
+    def run(cmd, code, env, timeout):
+        if '--reload' in cmd:
+            human[0] = True
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        return subprocess.CompletedProcess(cmd, 1, '', 'HERMES_BROWSER_BOT_CHALLENGE')
+    monkeypatch.setattr(bu, '_run_cli_killing_process_group', run)
+    result = json.loads(bu.browser_exec('wait_for_load()', task_id='research'))
+    assert result['browser_released'] is False
+    owned_browser.assert_not_called()
+
+
+@pytest.mark.platforms('posix')
+def test_destructive_close_excludes_human_ownership_transition(monkeypatch, owned_browser):
+    import fcntl
+    from tools.bot_desktop import lease
+    from tools.browser_use_challenge import release_challenged_browser
+    blocked = []
+    def cleanup(key):
+        with lease._path(None).with_suffix('.lock').open('a+') as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                blocked.append(True)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    monkeypatch.setattr(lifecycle, 'cleanup_browser', cleanup)
+    monkeypatch.setattr(bu, '_run_cli_killing_process_group', lambda *args: subprocess.CompletedProcess(args[0], 0, '', ''))
+    result = release_challenged_browser(['fake-browser'], {}, 'research', '', False, fenced=True)
+    assert result['browser_released'] is True
+    assert blocked == [True]

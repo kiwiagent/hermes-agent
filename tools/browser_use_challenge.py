@@ -39,7 +39,7 @@ _hermes_check_challenge()
 def release_challenged_browser(cmd, env, task_id, session, sidecar, *, fenced=False):
     """Close only this private route; never close a human-controlled shared screen."""
     from tools import browser_use_cli as bu
-    from tools.browser_tool_lifecycle import cleanup_browser, _human_holds_shared_browser
+    from tools.browser_tool_lifecycle import _human_holds_shared_browser
     from tools.browser_tool_session import run_fenced
 
     key = bu._backend_cache_key(task_id, session, sidecar)
@@ -51,10 +51,31 @@ def release_challenged_browser(cmd, env, task_id, session, sidecar, *, fenced=Fa
             bu._run_cli_killing_process_group([*cmd, "--reload"], "", env, 15)
         except (OSError, subprocess.SubprocessError):
             logger.warning("Could not stop challenged browser harness", exc_info=True)
-        finally:
-            cleanup_browser(key)
+        return {"browser_released": _close_private_route(key, env, fenced=fenced)}
+
+    result = run_fenced({"features": {"local": True}}, release) if fenced else release()
+    return {"browser_released": False, **result}
+
+
+def _close_private_route(key, env, *, fenced):
+    from tools import browser_use_cli as bu
+    from tools.browser_tool_lifecycle import cleanup_browser, _human_holds_shared_browser
+    from tools.bot_desktop import lease
+
+    def close():
+        # Revalidate after the possibly slow harness reload.
+        if _human_holds_shared_browser(key):
+            return False
+        cleanup_browser(key)
         with bu._driven_daemons_lock:
             bu._driven_daemons.discard(env.get("BU_NAME", "default"))
-        return {"browser_released": True}
+        return True
 
-    return run_fenced({"features": {"local": True}}, release) if fenced else release()
+    if not fenced:
+        return close()
+    if lease.fcntl is None:
+        return False  # Without cross-process exclusion, leave a human-capable browser to its janitor.
+    # A post-action epoch check cannot undo a browser kill. Serialize destructive
+    # teardown with the EXISTING human-control transition lock instead.
+    with lease._locked(lease._path(None)):
+        return False if lease.human_holds() else close()
