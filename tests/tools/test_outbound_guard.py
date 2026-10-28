@@ -12,6 +12,7 @@ from tools.outbound_guard import (
     allowable_http_host,
     detect_outbound_action,
     detect_outbound_command,
+    detect_outbound_script_file,
 )
 
 
@@ -203,6 +204,63 @@ class TestCommandWithScriptFile:
 
     def test_missing_script_is_not_an_error(self, tmp_path):
         assert detect_outbound_command("python nope.py", cwd=str(tmp_path))[0] is False
+
+    @pytest.mark.parametrize("template", [
+        'python3 "{script}"',
+        "python3 '{script}'",
+        'python3 "{script}" --to boss',
+    ])
+    def test_quoted_script_path_is_still_scanned(self, tmp_path, template):
+        # A quoted path used to skip the file scan entirely, so a buddy
+        # script's send went unflagged.
+        script = tmp_path / "send_report.py"
+        script.write_text("import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
+
+        found, key, _ = detect_outbound_command(template.format(script=script))
+
+        assert found and key == "outbound:email"
+
+    def test_quoted_script_path_with_a_space_is_still_scanned(self, tmp_path):
+        script = tmp_path / "send report.py"
+        script.write_text("import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
+
+        found, key, _ = detect_outbound_command(f'python3 "{script}"')
+
+        assert found and key == "outbound:email"
+
+    @pytest.mark.parametrize("template", [
+        'bash -c "python3 send.py"',
+        "sh -c 'cd . && python3 send.py'",
+        'env bash -c "python3 send.py"',
+        'bash -c "timeout 30 python3 send.py"',
+        'bash -c "exec send.py"',
+        'sh -c "nice send.py"',
+        'bash -c "FOO=1 python3 send.py"',
+        'bash -c "/usr/bin/python3 send.py"',
+        'sh -c "PYTHONPATH=. python3 send.py"',
+        'sh -c "stdbuf -oL python3 send.py"',
+    ])
+    def test_a_quoted_command_is_not_a_path_but_its_script_is_scanned(self, tmp_path, template):
+        # Quoting the *command* used to capture the whole string as a path, so
+        # the script inside it was never scanned: wrappers and absolute
+        # interpreters must not swallow it.
+        (tmp_path / "send.py").write_text("import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
+
+        found, key, _ = detect_outbound_command(template, cwd=str(tmp_path))
+
+        assert found and key == "outbound:email"
+
+    @pytest.mark.parametrize("template", ['python3 "{path}"', "python3 '{path}'"])
+    def test_a_quoted_path_starting_with_a_command_word_is_still_scanned(self, tmp_path, template):
+        # `env/` is a plausible virtualenv directory; a path is a path however
+        # its first segment is spelled.
+        (tmp_path / "env").mkdir()
+        (tmp_path / "env" / "send.py").write_text("import smtplib\nsmtplib.SMTP('x')\n")
+
+        found, key, _ = detect_outbound_command(
+            template.format(path=tmp_path / "env" / "send.py"))
+
+        assert found and key == "outbound:email"
 
     def test_plain_command_is_scanned(self, tmp_path):
         found, key, _ = detect_outbound_command(
@@ -599,3 +657,134 @@ class TestPlatformCliSource:
         script.write_text(f"import subprocess\nsubprocess.run(['python3', '{SB}', 'gcal', 'delete', 'e1'])\n")
         found, key, _ = detect_outbound_command(f"python3 {script}")
         assert found and key == "outbound:calendar"
+
+
+# The installed CLI's own source (bug 2026-10-28): every SmartBuddy turn runs
+# `python3 .../sb.py …`, and the command scan reads the file it runs. An
+# argparse help string mentioning the mail client ("himalaya config for every
+# connected mailbox") was read as a hidden way to send email, so *every*
+# question raised an "Allow your buddy to do this? send an email" card — and
+# email is never always-allowable, so the user could not stop it.
+OLD_SB_SOURCE = '''"""SmartBuddy's platform CLI.
+
+    sb mail setup                 (himalaya config for every connected mailbox)
+    sb gcal add --title T --date D
+    sb facebook post --message hi
+"""
+import argparse
+
+parser = argparse.ArgumentParser()
+sub = parser.add_subparsers()
+mail = sub.add_parser("mail")
+mail.add_parser(
+    "setup",
+    help="himalaya config for every connected mailbox (run before using himalaya)",
+)
+'''
+
+
+class TestInstalledCliOwnSourceNeverAsks:
+    def _install(self, tmp_path, monkeypatch, source=OLD_SB_SOURCE):
+        import tools.outbound_guard as guard
+        plugins = tmp_path / "platforms" / "smartbuddy"
+        plugins.mkdir(parents=True, exist_ok=True)
+        cli = plugins / "sb.py"
+        cli.write_text(source)
+        monkeypatch.setattr(guard, "_PLATFORM_CLI", str(cli))
+        return cli
+
+    @pytest.mark.parametrize("args", [
+        "calendar",
+        "mail accounts",
+        "mail search from:school",
+        "mail password",
+        "mail unsubscribe news@x.co",
+        "trails near",
+        "whoami",
+    ])
+    def test_running_the_installed_cli_never_asks(self, tmp_path, monkeypatch, args):
+        # Reads only: a write on this command line (gcal add, facebook post)
+        # is still an action — see TestSmartBuddyCalendarWrites /
+        # TestSmartBuddyFacebookWrites.
+        cli = self._install(tmp_path, monkeypatch)
+        assert detect_outbound_command(f"python3 {cli} {args}")[0] is False
+
+    @pytest.mark.platforms("posix")
+    def test_symlinked_cli_never_asks(self, tmp_path, monkeypatch):
+        cli = self._install(tmp_path, monkeypatch)
+        link = tmp_path / "bin" / "sb.py"
+        link.parent.mkdir()
+        link.symlink_to(cli)
+        assert detect_outbound_command(f"python3 {link} calendar")[0] is False
+
+    def test_relative_path_to_the_cli_never_asks(self, tmp_path, monkeypatch):
+        cli = self._install(tmp_path, monkeypatch)
+        assert detect_outbound_command("python3 sb.py calendar", cwd=str(cli.parent))[0] is False
+
+    def test_sibling_module_really_sending_still_asks(self, tmp_path, monkeypatch):
+        # Only the CLI file is exempt: a file beside it is the buddy's own
+        # code and judged like any other script.
+        cli = self._install(tmp_path, monkeypatch)
+        helper = cli.parent / "area.py"
+        helper.write_text(
+            'import subprocess\n'
+            'subprocess.run(["himalaya", "message", "send", "-a", "me@x.co"])\n'
+        )
+        found, key, _ = detect_outbound_command(f"python3 {helper}")
+        assert found and key == "outbound:email"
+
+    def test_copy_of_the_cli_source_elsewhere_still_asks(self, tmp_path, monkeypatch):
+        # The exemption is file identity: the same text at another path is the
+        # buddy's own code, judged on what it really does (not on its help
+        # text, which the exemption is there to ignore).
+        self._install(tmp_path, monkeypatch)
+        copy = tmp_path / "copied_cli.py"
+        copy.write_text(OLD_SB_SOURCE + "import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
+        found, key, _ = detect_outbound_command(f"python3 {copy}")
+        assert found and key == "outbound:email"
+
+    @pytest.mark.parametrize(("args", "key"), [
+        ("gcal add --title x --date 2026-11-02", "outbound:calendar"),
+        ("gcal delete e1", "outbound:calendar"),
+        ("facebook post --message hi", "outbound:publish"),
+    ])
+    def test_a_cli_write_on_the_command_line_still_asks(self, tmp_path, monkeypatch, args, key):
+        # The exemption covers reading the CLI's own source, never an action
+        # the command line asks for.
+        cli = self._install(tmp_path, monkeypatch)
+        assert detect_outbound_command(f"python3 {cli} {args}")[:2] == (True, key)
+        assert detect_outbound_command(f'python3 "{cli}" {args}')[:2] == (True, key)
+        assert detect_outbound_command(f'bash -c "python3 {cli} {args}"')[:2] == (True, key)
+
+    def test_a_cli_write_inside_a_buddy_script_still_asks(self, tmp_path, monkeypatch):
+        cli = self._install(tmp_path, monkeypatch)
+        script = tmp_path / "tidy.py"
+        script.write_text(f"import subprocess\nsubprocess.run(['python3', {str(cli)!r}, 'gcal', 'delete', 'e1'])\n")
+        assert detect_outbound_command(f"python3 {script}")[:2] == (True, "outbound:calendar")
+
+    def test_scanning_the_installed_cli_by_path_never_asks(self, tmp_path, monkeypatch):
+        # A host that runs a file by path goes through this entry point, and it
+        # exempts the same file identity as the command-line scan.
+        cli = self._install(tmp_path, monkeypatch)
+        assert detect_outbound_script_file(str(cli))[0] is False
+
+    def test_a_sending_script_by_path_still_asks(self, tmp_path, monkeypatch):
+        self._install(tmp_path, monkeypatch)
+        script = tmp_path / "send.py"
+        script.write_text(OLD_SB_SOURCE + "import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
+        assert detect_outbound_script_file(str(script))[:2] == (True, "outbound:email")
+
+
+# The label exemption once proposed with this fix (hermes#30) let a value that
+# merely *looks* like a label carry the mail client into a send. Only the
+# installed CLI's own file is exempt; a buddy script naming the client asks,
+# whatever the keyword (asking is the safe direction).
+class TestLabelNamesDoNotExemptTheMailClient:
+    @pytest.mark.parametrize("text", [
+        'd = dict(help="himalaya --account work")\n'
+        'subprocess.run(d["help"].split() + ["message", "send"])\n',
+        'p = argparse.ArgumentParser(prog="himalaya")\n'
+        'subprocess.run([p.prog, "message", "send"])\n',
+    ])
+    def test_a_label_keyword_carrying_the_client_still_asks(self, text):
+        assert detect_outbound_action(text)[:2] == (True, "outbound:email")

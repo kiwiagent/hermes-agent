@@ -69,6 +69,21 @@ _PUBLISH_CLI_PATTERNS = [
 # subcommand) must not count as running them.
 _PLATFORM_CLI = "/opt/hermes/plugins/platforms/smartbuddy/sb.py"
 
+
+def _is_platform_cli(path: str) -> bool:
+    """``path`` is the installed platform CLI itself.
+
+    Only that one file is exempt: its help text and docstrings name every
+    subcommand, the mail client behind a mailbox and the HTTP calls the plugin
+    makes to the platform itself — none of that is an action. A file beside it
+    is the buddy's business like any other script, and running the CLI is
+    judged by the command line that runs it. ``path`` comes from
+    :func:`_read_script` already resolved with ``realpath``, so the same file
+    reached through a symlink or a relative path is recognised too.
+    """
+    return os.path.realpath(path) == os.path.realpath(os.path.expanduser(_PLATFORM_CLI))
+
+
 _HTTP_WRITE_PATTERNS = [
     r"\bcurl\b[^\n;|]*?(?:-X\s*|--request[\s=]+)['\"]?(?:POST|PUT|PATCH|DELETE)\b",
     r"\bcurl\b[^\n;|]*?\s(?:-d|--data(?:-raw|-binary|-urlencode)?|-F|--form|--json|-T|--upload-file)(?=[\s=@'\"])",
@@ -384,11 +399,17 @@ def _notion_read_only(text: str) -> bool:
     return True
 
 
-# `python3 x.py`, `bash -e run.sh`, `node a.js`, `./send.sh`
+# `python3 x.py`, `bash -e run.sh`, `node a.js`, `./send.sh` — also as a
+# subprocess argument list.
+_SCRIPT_EXT = r"\.(?:py|sh|bash|js|mjs|cjs|jsx|tsx|mts|cts|ts|rb|pl)"
 _SCRIPT_RUN_RE = re.compile(
     r"(?:^|[\s;|&(])(?:(?:python[\d.]*|bash|sh|zsh|node|ruby|perl)\s+(?:-\S+\s+)*)?"
-    r"((?:\.{0,2}/)?[\w./~-]+\.(?:py|sh|bash|js|mjs|cjs|jsx|tsx|mts|cts|ts|rb|pl))\b"
+    r"""((?:\.{0,2}/)?[\w./~-]+""" + _SCRIPT_EXT + r""")\b"""
 )
+# The same with the path quoted (`python3 "my script.py"`), which used to skip
+# the scan. A quoted *command* (`bash -c "python3 send.py"`) matches here too,
+# but it names no file; the pass above finds the script inside it.
+_SCRIPT_QUOTED_RE = re.compile(r"""['"]([^'"\n]+""" + _SCRIPT_EXT + r""")['"]""")
 _MAX_SCRIPT_BYTES = 256 * 1024
 
 OutboundMatch = Tuple[bool, Optional[str], Optional[str]]
@@ -428,20 +449,23 @@ def detect_outbound_action(text: str, *, platform_cli_source: bool = False) -> O
 
     ``description`` is plain English for the approval prompt ("send an
     email"); the SmartBuddy plugin renders it in the user's language.
-    ``platform_cli_source``: ``text`` is sb.py itself, whose help text names
-    its subcommands — those count only on a command line or in other code.
+    ``platform_cli_source``: ``text`` is the installed CLI's own source, which
+    only *describes* what its subcommands do — those count on a command line
+    or in a script of the buddy's own, never in the plugin's own source.
+    Skipping it here matters for every pattern, not just the CLI ones: a help
+    string naming the mail client ("himalaya config for every connected
+    mailbox") is not a hidden way to send an email.
     """
-    if not text:
+    if not text or platform_cli_source:
         return _NONE
     if _any(_EMAIL_RE, text):
         return True, "outbound:email", "send an email"
     if _any(_MESSAGE_RE, text):
         return True, "outbound:message", "send a message to someone"
-    if not platform_cli_source:
-        if _any(_PUBLISH_CLI_RE, text):
-            return True, "outbound:publish", "post on Facebook"
-        if _any(_CALENDAR_RE, text):
-            return True, "outbound:calendar", "change your calendar"
+    if _any(_PUBLISH_CLI_RE, text):
+        return True, "outbound:publish", "post on Facebook"
+    if _any(_CALENDAR_RE, text):
+        return True, "outbound:calendar", "change your calendar"
     text = _without_curl_get_reads(text)
     if _any(_HTTP_WRITE_RE, text):
         hosts = [h.lower() for h in _URL_HOST_RE.findall(text)]
@@ -487,13 +511,17 @@ def allowable_http_host(key: Optional[str]) -> Optional[str]:
 
 
 def _script_paths(command: str) -> list[str]:
-    paths = []
-    for m in _SCRIPT_RUN_RE.finditer(command):
-        paths.append(m.group(1))
-    return paths
+    paths = [m.group(1) for m in _SCRIPT_RUN_RE.finditer(command)]
+    paths += [m.group(1) for m in _SCRIPT_QUOTED_RE.finditer(command)]
+    return list(dict.fromkeys(paths))
 
 
-def _read_script(raw: str, cwd: Optional[str]) -> Optional[str]:
+def _read_script(raw: str, cwd: Optional[str]) -> Optional[tuple[str, str]]:
+    """(realpath of the script ``raw`` names, its source), or None.
+
+    The path comes back with the source because the scan needs to know *whose*
+    code it is reading: the platform CLI's own source describes the actions
+    instead of taking them (see :func:`_is_platform_cli`)."""
     expanded = os.path.expanduser(raw)
     candidates = []
     if os.path.isabs(expanded):
@@ -508,7 +536,7 @@ def _read_script(raw: str, cwd: Optional[str]) -> Optional[str]:
         try:
             if path.is_file():
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    return f.read(_MAX_SCRIPT_BYTES)
+                    return os.path.realpath(str(path)), f.read(_MAX_SCRIPT_BYTES)
         except OSError:
             continue
     return None
@@ -520,10 +548,11 @@ def detect_outbound_command(command: str, cwd: Optional[str] = None) -> Outbound
     code to a file first, so the command line alone shows nothing."""
     matches = [detect_outbound_action(command)]
     for raw in _script_paths(command):
-        content = _read_script(raw, cwd)
-        if content:
-            cli = os.path.normpath(os.path.expanduser(raw)) == os.path.normpath(_PLATFORM_CLI)
-            matches.append(detect_outbound_action(content, platform_cli_source=cli))
+        script = _read_script(raw, cwd)
+        if script:
+            path, source = script
+            matches.append(detect_outbound_action(
+                source, platform_cli_source=_is_platform_cli(path)))
     matches = [m for m in matches if m[0]]
     if not matches:
         return _NONE
@@ -538,9 +567,15 @@ def detect_outbound_command(command: str, cwd: Optional[str] = None) -> Outbound
 
 
 def detect_outbound_script_file(path: str) -> OutboundMatch:
-    """Scan one script file (cron jobs run their scripts directly)."""
-    content = _read_script(path, None)
-    return detect_outbound_action(content or "")
+    """Scan one script file (cron jobs run their scripts directly).
+
+    The platform CLI's own file is exempt, like everywhere else."""
+    script = _read_script(path, None)
+    if not script:
+        return _NONE
+    resolved, source = script
+    return detect_outbound_action(
+        source, platform_cli_source=_is_platform_cli(resolved))
 
 
 __all__ = [
