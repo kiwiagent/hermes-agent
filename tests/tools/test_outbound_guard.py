@@ -6,6 +6,8 @@ people, data written to an external service — is detected so it can always be
 put in front of the user (never smart-auto-approved), and never runs from a
 cron job where no one is there to approve it.
 """
+import time
+
 import pytest
 
 from tools.outbound_guard import (
@@ -839,6 +841,18 @@ class TestInstalledCliOwnSourceNeverAsks:
             for i in range(200))
         assert detect_outbound_action(text)[0] is False
 
+    def test_an_unterminated_docstring_with_escapes_stays_linear(self):
+        # An unterminated `"""` used to make the tokenizer try every way to
+        # split a backslash pair: ~500 bytes took seconds and a truncated
+        # 256 KiB script would never return.  The walk stays linear now.
+        text = ('"""Mail helper.\n\n'
+                + 'x = re.compile(r"\\d+")\n' * 30
+                + 'client = "himalaya"\n')
+        started = time.monotonic()
+        found, key, _ = detect_outbound_action(text)
+        assert found and key == "outbound:email"
+        assert time.monotonic() - started < 2.0
+
     @pytest.mark.parametrize("text", [
         'def send(prog="himalaya"):\n    subprocess.run([prog, "message", "send"])',
         'def send(a,\n         prog="himalaya"):\n    subprocess.run([prog, "message", "send"])',
@@ -878,6 +892,8 @@ class TestInstalledCliOwnSourceNeverAsks:
             'parser.\tdescription = "himalaya login"')[0] is False
         assert detect_outbound_action(
             'parser\f.description = "himalaya login"')[0] is False
+        assert detect_outbound_action(
+            'parser.\fdescription = "himalaya login"')[0] is False
         assert detect_outbound_action(
             'parser.description="himalaya login"')[0] is True
 

@@ -78,8 +78,8 @@ _ATTRIBUTE_RE = re.compile(r"[\w)\]][^\S\n]*\.[^\S\n]*\Z")
 # What a bracket counter must step over rather than count: strings, comments,
 # docstrings — matched at C speed, so a label-dense file costs one scan.
 _STRUCTURE_RE = re.compile(
-    r'"""(?:\\.|(?!""")[\s\S])*"""'
-    r"|'''(?:\\.|(?!''')[\s\S])*'''"
+    r'"""(?:\\.|(?!""")[^\\])*"""'
+    r"|'''(?:\\.|(?!''')[^\\])*'''"
     r"|#[^\n]*"
     r'|"(?:\\.|[^"\\\n])*"'
     r"|'(?:\\.|[^'\\\n])*'"
