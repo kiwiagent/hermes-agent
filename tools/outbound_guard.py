@@ -40,8 +40,121 @@ _EMAIL_PATTERNS = [
     # kiwiagent (security review 2026-10-27): the same with the subcommand
     # split by quotes ('mess''age' send), or himalaya hidden in a variable.
     r"""\bhimalaya\b[^\n;|&]*?(?:mess|msg|templ|tpl)['"a-z]*[\s,]+['"]?(?:send|write|compose|reply|forward|fwd)\b""",
-    r"""\b[a-z_]\w*=['"]?himalaya\b""",
+    # The installed CLI's own source is exempt from the scan (see
+    # _is_platform_cli): no rule applies to that file's text, so the mail
+    # client it configures is judged on the command line that runs it. The
+    # shipped CLI has no mail-send subcommand (its `mail unsubscribe` is
+    # cardless by the plugin's contract test in smartbuddy-hermes-plugin
+    # tests/test_sb_cli.py); one that ships needs a rule of its own here.
 ]
+
+# himalaya hidden in a variable: ``client = "himalaya"`` then
+# ``client.message.send()`` is a send. A keyword argument that only *labels*
+# the client for a human is not — an argparse
+# ``help="himalaya config for every connected mailbox"`` was the 2026-10-28
+# card that showed on every SmartBuddy turn, and ``usage=``/``prog=`` etc. read
+# the same way. What makes it a label is the prose, or an argument-parser
+# call: ``help="himalaya config …"`` in any call and ``ArgumentParser(prog=
+# "himalaya")`` are labels, while ``send(prog="himalaya")`` passes the client
+# and still asks — the name alone does not exempt a bare value. An assignment
+# in a call's argument list with a label name is a label, and a signature
+# default is not an argument. A spaced ``x.description = …`` attribute write
+# is a label because the attribute *is* one of those names; every other
+# spelling counts, including a bare ``cfg.client=…`` and a spaced
+# ``self.mail = …`` that holds the client.
+_HIMALAYA_VAR_RE = re.compile(r"""(?<!\w)([a-z_]\w*)=['"]?himalaya\b""", _FLAGS)
+_HIMALAYA_SPACED_VAR_RE = re.compile(
+    r"""(?<!\w)([a-z_]\w*)\s*=\s*['"]?himalaya\b""", _FLAGS)
+_LABEL_KWARGS = frozenset(
+    {"help", "description", "metavar", "dest", "usage", "epilog", "prog"})
+# A label reads on as prose (``"himalaya config for …"``) or is a keyword of
+# the argument parser itself (``ArgumentParser(prog="himalaya")``).
+_PROSE_RE = re.compile(r"""[a-z_]\w*\s*=\s*['"]?himalaya\b\s""", _FLAGS)
+_PARSER_CALLEE_RE = re.compile(
+    r"(?:^|\.)(?:add_argument|add_parser|argumentparser)$", _FLAGS)
+_SIGNATURE_RE = re.compile(r"\b(?:def|class)\s+\w+(?:\[[^\]\n]*\])?\s*$")
+_ATTRIBUTE_RE = re.compile(r"[\w)\]][^\S\n]*\.[^\S\n]*\Z")
+
+# What a bracket counter must step over rather than count: strings, comments,
+# docstrings — matched at C speed, so a label-dense file costs one scan.
+_STRUCTURE_RE = re.compile(
+    r'"""(?:\\.|(?!""")[^\\])*"""'
+    r"|'''(?:\\.|(?!''')[^\\])*'''"
+    r"|#[^\n]*"
+    r'|"(?:\\.|[^"\\\n])*"'
+    r"|'(?:\\.|[^'\\\n])*'"
+    r"|[()\[\]{}]"
+)
+
+
+def _callee(tail: str) -> str:
+    """The dotted name a call's ``(`` belongs to, lower-cased (empty if none)."""
+    tail = tail.rstrip()
+    start = len(tail)
+    while start and (tail[start - 1].isalnum() or tail[start - 1] in "_."):
+        start -= 1
+    return tail[start:].lower()
+
+
+def _himalaya_hidden_in_a_variable(text: str) -> bool:
+    """True when the text names the mail client where it could be sent with.
+
+    A label for a human — prose in a keyword argument, or the argument
+    parser's own keywords — does not count; see the patterns' comment.
+    """
+    mentions = sorted(
+        [(m.start(), m.group(1).lower(), False) for m in _HIMALAYA_VAR_RE.finditer(text)]
+        + [(m.start(), m.group(1).lower(), True)
+           for m in _HIMALAYA_SPACED_VAR_RE.finditer(text)]
+    )
+    if not mentions:
+        return False
+    calls: list[tuple[bool, str]] = []  # per open bracket: def/class head, callee
+    last = ""  # last visible character before the cursor
+    tail = ""  # visible text, for the def/class and callee lookbacks
+    tokens = _STRUCTURE_RE.finditer(text)
+    token = next(tokens, None)
+    cursor = 0
+    for start, name, spaced in mentions:
+        while token is not None and token.start() < start:
+            raw = text[cursor:token.start()]
+            tail = (tail + raw)[-256:]
+            run = raw.rstrip()
+            if run:
+                last = run[-1]
+            bracket = token.group() if token.group() in "([{)]}" else ""
+            if bracket:
+                if bracket in "([{":
+                    if bracket == "(" and _SIGNATURE_RE.search(tail):
+                        calls.append((True, ""))
+                    else:
+                        calls.append((False, _callee(tail)))
+                elif calls:
+                    calls.pop()
+                last = bracket
+                tail = (tail + bracket)[-256:]
+            cursor = token.end()
+            token = next(tokens, None)
+        raw = text[cursor:start]
+        tail = (tail + raw)[-256:]
+        run = raw.rstrip()
+        if run:
+            last = run[-1]
+        cursor = max(cursor, start)
+        if name in _LABEL_KWARGS:
+            # An argument boundary inside a call makes a label; a signature's
+            # default is not an argument, so ``def send(prog="himalaya")``
+            # counts, and so does a bare value passed to an ordinary callee.
+            if calls and not calls[-1][0] and last and last in ",([":
+                if (_PROSE_RE.match(text, start)
+                        or _PARSER_CALLEE_RE.search(calls[-1][1])):
+                    continue
+            # ``x.description = "himalaya login"`` is prose, not a client.
+            elif spaced and _ATTRIBUTE_RE.search(tail):
+                continue
+        return True
+    return False
+
 
 _MESSAGE_PATTERNS = [
     r"\btwilio\b",
@@ -56,6 +169,7 @@ _MESSAGE_PATTERNS = [
 # internal address, so the HTTP rules let them through — judged by subcommand
 # instead. Also matched as a subprocess argument list. Reads don't match.
 _SB = r"""\bsb(?:\.py)?['"]?[\s,'"]+"""
+
 _CALENDAR_PATTERNS = [
     _SB + r"""gcal['"]?[\s,'"]+(?:add|change|delete)\b""",
 ]
@@ -68,6 +182,21 @@ _PUBLISH_CLI_PATTERNS = [
 # The platform CLI as installed: reading its source (help text names every
 # subcommand) must not count as running them.
 _PLATFORM_CLI = "/opt/hermes/plugins/platforms/smartbuddy/sb.py"
+
+
+def _is_platform_cli(path: str) -> bool:
+    """``path`` is the installed platform CLI itself.
+
+    Only that one file is exempt: its help text and docstrings name every
+    subcommand, the mail client behind a mailbox and the HTTP calls the plugin
+    makes to the platform itself — none of that is an action. A file beside it
+    is the buddy's business like any other script, and running the CLI is
+    judged by the command line that runs it. ``path`` comes from
+    :func:`_read_script` already resolved with ``realpath``, so the same file
+    reached through a symlink or a relative path is recognised too.
+    """
+    return os.path.realpath(path) == os.path.realpath(os.path.expanduser(_PLATFORM_CLI))
+
 
 _HTTP_WRITE_PATTERNS = [
     r"\bcurl\b[^\n;|]*?(?:-X\s*|--request[\s=]+)['\"]?(?:POST|PUT|PATCH|DELETE)\b",
@@ -384,11 +513,17 @@ def _notion_read_only(text: str) -> bool:
     return True
 
 
-# `python3 x.py`, `bash -e run.sh`, `node a.js`, `./send.sh`
+# `python3 x.py`, `bash -e run.sh`, `node a.js`, `./send.sh` — also as a
+# subprocess argument list.
+_SCRIPT_EXT = r"\.(?:py|sh|bash|js|mjs|cjs|jsx|tsx|mts|cts|ts|rb|pl)"
 _SCRIPT_RUN_RE = re.compile(
     r"(?:^|[\s;|&(])(?:(?:python[\d.]*|bash|sh|zsh|node|ruby|perl)\s+(?:-\S+\s+)*)?"
-    r"((?:\.{0,2}/)?[\w./~-]+\.(?:py|sh|bash|js|mjs|cjs|jsx|tsx|mts|cts|ts|rb|pl))\b"
+    r"""((?:\.{0,2}/)?[\w./~-]+""" + _SCRIPT_EXT + r""")\b"""
 )
+# The same with the path quoted (`python3 "my script.py"`), which used to skip
+# the scan. A quoted *command* (`bash -c "python3 send.py"`) matches here too,
+# but it names no file; the pass above finds the script inside it.
+_SCRIPT_QUOTED_RE = re.compile(r"""['"]([^'"\n]+""" + _SCRIPT_EXT + r""")['"]""")
 _MAX_SCRIPT_BYTES = 256 * 1024
 
 OutboundMatch = Tuple[bool, Optional[str], Optional[str]]
@@ -428,20 +563,23 @@ def detect_outbound_action(text: str, *, platform_cli_source: bool = False) -> O
 
     ``description`` is plain English for the approval prompt ("send an
     email"); the SmartBuddy plugin renders it in the user's language.
-    ``platform_cli_source``: ``text`` is sb.py itself, whose help text names
-    its subcommands — those count only on a command line or in other code.
+    ``platform_cli_source``: ``text`` is the installed CLI's own source, which
+    only *describes* what its subcommands do — those count on a command line
+    or in a script of the buddy's own, never in the plugin's own source.
+    Skipping it here matters for every pattern, not just the CLI ones: a help
+    string naming the mail client ("himalaya config for every connected
+    mailbox") is not a hidden way to send an email.
     """
-    if not text:
+    if not text or platform_cli_source:
         return _NONE
-    if _any(_EMAIL_RE, text):
+    if _any(_EMAIL_RE, text) or _himalaya_hidden_in_a_variable(text):
         return True, "outbound:email", "send an email"
     if _any(_MESSAGE_RE, text):
         return True, "outbound:message", "send a message to someone"
-    if not platform_cli_source:
-        if _any(_PUBLISH_CLI_RE, text):
-            return True, "outbound:publish", "post on Facebook"
-        if _any(_CALENDAR_RE, text):
-            return True, "outbound:calendar", "change your calendar"
+    if _any(_PUBLISH_CLI_RE, text):
+        return True, "outbound:publish", "post on Facebook"
+    if _any(_CALENDAR_RE, text):
+        return True, "outbound:calendar", "change your calendar"
     text = _without_curl_get_reads(text)
     if _any(_HTTP_WRITE_RE, text):
         hosts = [h.lower() for h in _URL_HOST_RE.findall(text)]
@@ -487,13 +625,17 @@ def allowable_http_host(key: Optional[str]) -> Optional[str]:
 
 
 def _script_paths(command: str) -> list[str]:
-    paths = []
-    for m in _SCRIPT_RUN_RE.finditer(command):
-        paths.append(m.group(1))
-    return paths
+    paths = [m.group(1) for m in _SCRIPT_RUN_RE.finditer(command)]
+    paths += [m.group(1) for m in _SCRIPT_QUOTED_RE.finditer(command)]
+    return list(dict.fromkeys(paths))
 
 
-def _read_script(raw: str, cwd: Optional[str]) -> Optional[str]:
+def _read_script(raw: str, cwd: Optional[str]) -> Optional[tuple[str, str]]:
+    """(realpath of the script ``raw`` names, its source), or None.
+
+    The path comes back with the source because the scan needs to know *whose*
+    code it is reading: the platform CLI's own source describes the actions
+    instead of taking them (see :func:`_is_platform_cli`)."""
     expanded = os.path.expanduser(raw)
     candidates = []
     if os.path.isabs(expanded):
@@ -507,8 +649,8 @@ def _read_script(raw: str, cwd: Optional[str]) -> Optional[str]:
     for path in candidates:
         try:
             if path.is_file():
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    return f.read(_MAX_SCRIPT_BYTES)
+                with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+                    return os.path.realpath(str(path)), f.read(_MAX_SCRIPT_BYTES)
         except OSError:
             continue
     return None
@@ -520,10 +662,11 @@ def detect_outbound_command(command: str, cwd: Optional[str] = None) -> Outbound
     code to a file first, so the command line alone shows nothing."""
     matches = [detect_outbound_action(command)]
     for raw in _script_paths(command):
-        content = _read_script(raw, cwd)
-        if content:
-            cli = os.path.normpath(os.path.expanduser(raw)) == os.path.normpath(_PLATFORM_CLI)
-            matches.append(detect_outbound_action(content, platform_cli_source=cli))
+        script = _read_script(raw, cwd)
+        if script:
+            path, source = script
+            matches.append(detect_outbound_action(
+                source, platform_cli_source=_is_platform_cli(path)))
     matches = [m for m in matches if m[0]]
     if not matches:
         return _NONE
@@ -538,9 +681,17 @@ def detect_outbound_command(command: str, cwd: Optional[str] = None) -> Outbound
 
 
 def detect_outbound_script_file(path: str) -> OutboundMatch:
-    """Scan one script file (cron jobs run their scripts directly)."""
-    content = _read_script(path, None)
-    return detect_outbound_action(content or "")
+    """Scan one script file that is run directly, not through a command line.
+
+    Cron jobs pass their script text to the guard themselves, so nothing in
+    this repository calls this function; it is here for hosts that run a file
+    by path. The platform CLI's own file is exempt, like everywhere else."""
+    script = _read_script(path, None)
+    if not script:
+        return _NONE
+    resolved, source = script
+    return detect_outbound_action(
+        source, platform_cli_source=_is_platform_cli(resolved))
 
 
 __all__ = [

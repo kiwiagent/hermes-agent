@@ -6,12 +6,15 @@ people, data written to an external service — is detected so it can always be
 put in front of the user (never smart-auto-approved), and never runs from a
 cron job where no one is there to approve it.
 """
+import time
+
 import pytest
 
 from tools.outbound_guard import (
     allowable_http_host,
     detect_outbound_action,
     detect_outbound_command,
+    detect_outbound_script_file,
 )
 
 
@@ -203,6 +206,63 @@ class TestCommandWithScriptFile:
 
     def test_missing_script_is_not_an_error(self, tmp_path):
         assert detect_outbound_command("python nope.py", cwd=str(tmp_path))[0] is False
+
+    @pytest.mark.parametrize("template", [
+        'python3 "{script}"',
+        "python3 '{script}'",
+        'python3 "{script}" --to boss',
+    ])
+    def test_quoted_script_path_is_still_scanned(self, tmp_path, template):
+        # A quoted path used to skip the file scan entirely, so a buddy
+        # script's send went unflagged.
+        script = tmp_path / "send_report.py"
+        script.write_text("import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
+
+        found, key, _ = detect_outbound_command(template.format(script=script))
+
+        assert found and key == "outbound:email"
+
+    def test_quoted_script_path_with_a_space_is_still_scanned(self, tmp_path):
+        script = tmp_path / "send report.py"
+        script.write_text("import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
+
+        found, key, _ = detect_outbound_command(f'python3 "{script}"')
+
+        assert found and key == "outbound:email"
+
+    @pytest.mark.parametrize("template", [
+        'bash -c "python3 send.py"',
+        "sh -c 'cd . && python3 send.py'",
+        'env bash -c "python3 send.py"',
+        'bash -c "timeout 30 python3 send.py"',
+        'bash -c "exec send.py"',
+        'sh -c "nice send.py"',
+        'bash -c "FOO=1 python3 send.py"',
+        'bash -c "/usr/bin/python3 send.py"',
+        'sh -c "PYTHONPATH=. python3 send.py"',
+        'sh -c "stdbuf -oL python3 send.py"',
+    ])
+    def test_a_quoted_command_is_not_a_path_but_its_script_is_scanned(self, tmp_path, template):
+        # Quoting the *command* used to capture the whole string as a path, so
+        # the script inside it was never scanned: wrappers and absolute
+        # interpreters must not swallow it.
+        (tmp_path / "send.py").write_text("import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
+
+        found, key, _ = detect_outbound_command(template, cwd=str(tmp_path))
+
+        assert found and key == "outbound:email"
+
+    @pytest.mark.parametrize("template", ['python3 "{path}"', "python3 '{path}'"])
+    def test_a_quoted_path_starting_with_a_command_word_is_still_scanned(self, tmp_path, template):
+        # `env/` is a plausible virtualenv directory; a path is a path however
+        # its first segment is spelled.
+        (tmp_path / "env").mkdir()
+        (tmp_path / "env" / "send.py").write_text("import smtplib\nsmtplib.SMTP('x')\n")
+
+        found, key, _ = detect_outbound_command(
+            template.format(path=tmp_path / "env" / "send.py"))
+
+        assert found and key == "outbound:email"
 
     def test_plain_command_is_scanned(self, tmp_path):
         found, key, _ = detect_outbound_command(
@@ -599,3 +659,263 @@ class TestPlatformCliSource:
         script.write_text(f"import subprocess\nsubprocess.run(['python3', '{SB}', 'gcal', 'delete', 'e1'])\n")
         found, key, _ = detect_outbound_command(f"python3 {script}")
         assert found and key == "outbound:calendar"
+
+
+# The installed CLI's own source (bug 2026-10-28): every SmartBuddy turn runs
+# `python3 .../sb.py …`, and the command scan reads the file it runs. An
+# argparse help string mentioning the mail client ("himalaya config for every
+# connected mailbox") was read as a hidden way to send email, so *every*
+# question raised an "Allow your buddy to do this? send an email" card — and
+# email is never always-allowable, so the user could not stop it.
+OLD_SB_SOURCE = '''"""SmartBuddy's platform CLI.
+
+    sb mail setup                 (himalaya config for every connected mailbox)
+    sb gcal add --title T --date D
+    sb facebook post --message hi
+"""
+import argparse
+
+parser = argparse.ArgumentParser()
+sub = parser.add_subparsers()
+mail = sub.add_parser("mail")
+mail.add_parser(
+    "setup",
+    help="himalaya config for every connected mailbox (run before using himalaya)",
+)
+'''
+
+
+class TestInstalledCliOwnSourceNeverAsks:
+    def _install(self, tmp_path, monkeypatch, source=OLD_SB_SOURCE):
+        import tools.outbound_guard as guard
+        plugins = tmp_path / "platforms" / "smartbuddy"
+        plugins.mkdir(parents=True, exist_ok=True)
+        cli = plugins / "sb.py"
+        cli.write_text(source)
+        monkeypatch.setattr(guard, "_PLATFORM_CLI", str(cli))
+        return cli
+
+    @pytest.mark.parametrize("args", [
+        "calendar",
+        "mail accounts",
+        "mail search from:school",
+        "mail password",
+        "mail unsubscribe news@x.co",
+        "trails near",
+        "whoami",
+    ])
+    def test_running_the_installed_cli_never_asks(self, tmp_path, monkeypatch, args):
+        # Reads only: a write on this command line (gcal add, facebook post)
+        # is still an action — see TestSmartBuddyCalendarWrites /
+        # TestSmartBuddyFacebookWrites.
+        cli = self._install(tmp_path, monkeypatch)
+        assert detect_outbound_command(f"python3 {cli} {args}")[0] is False
+
+    @pytest.mark.platforms("posix")
+    def test_symlinked_cli_never_asks(self, tmp_path, monkeypatch):
+        cli = self._install(tmp_path, monkeypatch)
+        link = tmp_path / "bin" / "sb.py"
+        link.parent.mkdir()
+        link.symlink_to(cli)
+        assert detect_outbound_command(f"python3 {link} calendar")[0] is False
+
+    def test_relative_path_to_the_cli_never_asks(self, tmp_path, monkeypatch):
+        cli = self._install(tmp_path, monkeypatch)
+        assert detect_outbound_command("python3 sb.py calendar", cwd=str(cli.parent))[0] is False
+
+    def test_sibling_module_really_sending_still_asks(self, tmp_path, monkeypatch):
+        # Only the CLI file is exempt: a file beside it is the buddy's own
+        # code and judged like any other script.
+        cli = self._install(tmp_path, monkeypatch)
+        helper = cli.parent / "area.py"
+        helper.write_text(
+            'import subprocess\n'
+            'subprocess.run(["himalaya", "message", "send", "-a", "me@x.co"])\n'
+        )
+        found, key, _ = detect_outbound_command(f"python3 {helper}")
+        assert found and key == "outbound:email"
+
+    def test_copy_of_the_cli_source_elsewhere_still_asks(self, tmp_path, monkeypatch):
+        # The exemption is file identity: the same text at another path is the
+        # buddy's own code, judged on what it really does (not on its help
+        # text, which the exemption is there to ignore).
+        self._install(tmp_path, monkeypatch)
+        copy = tmp_path / "copied_cli.py"
+        copy.write_text(OLD_SB_SOURCE + "import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
+        found, key, _ = detect_outbound_command(f"python3 {copy}")
+        assert found and key == "outbound:email"
+
+    @pytest.mark.parametrize(("args", "key"), [
+        ("gcal add --title x --date 2026-11-02", "outbound:calendar"),
+        ("gcal delete e1", "outbound:calendar"),
+        ("facebook post --message hi", "outbound:publish"),
+    ])
+    def test_a_cli_write_on_the_command_line_still_asks(self, tmp_path, monkeypatch, args, key):
+        # The exemption covers reading the CLI's own source, never an action
+        # the command line asks for.
+        cli = self._install(tmp_path, monkeypatch)
+        assert detect_outbound_command(f"python3 {cli} {args}")[:2] == (True, key)
+        assert detect_outbound_command(f'python3 "{cli}" {args}')[:2] == (True, key)
+        assert detect_outbound_command(f'bash -c "python3 {cli} {args}"')[:2] == (True, key)
+
+    def test_a_cli_write_inside_a_buddy_script_still_asks(self, tmp_path, monkeypatch):
+        cli = self._install(tmp_path, monkeypatch)
+        script = tmp_path / "tidy.py"
+        script.write_text(f"import subprocess\nsubprocess.run(['python3', {str(cli)!r}, 'gcal', 'delete', 'e1'])\n")
+        assert detect_outbound_command(f"python3 {script}")[:2] == (True, "outbound:calendar")
+
+    def test_scanning_the_installed_cli_by_path_never_asks(self, tmp_path, monkeypatch):
+        # A host that runs a file by path goes through this entry point, and it
+        # exempts the same file identity as the command-line scan.
+        cli = self._install(tmp_path, monkeypatch)
+        assert detect_outbound_script_file(str(cli))[0] is False
+
+    def test_a_sending_script_by_path_still_asks(self, tmp_path, monkeypatch):
+        self._install(tmp_path, monkeypatch)
+        script = tmp_path / "send.py"
+        script.write_text(OLD_SB_SOURCE + "import smtplib\nsmtplib.SMTP('smtp.gmail.com')\n")
+        assert detect_outbound_script_file(str(script))[:2] == (True, "outbound:email")
+
+    @pytest.mark.parametrize("text", [
+        'mail.add_parser("setup", help="himalaya config for every connected mailbox")',
+        'ArgumentParser(prog="himalaya")',
+        'p.add_argument("--x", help="himalaya")',
+        'table.add_row("x", description="himalaya login")',
+        'table.add_row(name="x", usage="himalaya login")',
+        'dict(help="himalaya config")',
+        'mail.add_parser(\n    "setup",\n    help="himalaya config",\n)',
+        # A `#` or a bracket inside a one-line string is text, not structure.
+        'f("a # b", help="himalaya config")',
+        'f(")", help="himalaya config")',
+    ])
+    def test_a_label_naming_the_mail_client_is_not_a_send(self, text):
+        assert detect_outbound_action(text)[0] is False
+
+    @pytest.mark.parametrize("text", [
+        'usage="himalaya"\nsubprocess.run([usage, "message", "send"])',
+        'epilog = "himalaya"\nsend_mail(epilog)',
+        'help = "himalaya"\nhelp.send()',
+        'client="himalaya"\nclient.message.send()',
+        # An attribute that holds the client is a real configuration, not a
+        # label — base caught the bare form and still must.
+        'cfg.client="himalaya"\nsubprocess.run([cfg.client, "message", "send"])',
+        'self.mail="himalaya"\nsubprocess.run([self.mail, "message", "send"])',
+        'x.y.client="himalaya"\nrun([x.y.client, "message", "send"])',
+        # A comma or an open bracket left over from an earlier line does not
+        # make the next line a keyword argument.
+        'x = 1,\nusage="himalaya"\nsubprocess.run([usage, "message", "send"])',
+        '# list the mail hosts,\nusage="himalaya"\nsubprocess.run([usage, "send"])',
+        # A bare value passed at a call site is the client, not a label: only
+        # prose or the argument parser's own keywords read as labels.
+        'def send(prog):\n    subprocess.run([prog, "message", "send"])\nsend(prog="himalaya")',
+        'send(usage="himalaya")',
+        'kw = dict(prog="himalaya")\nsubprocess.run([kw["prog"], "message", "send"])',
+        # A spaced attribute that holds the client is configuration too.
+        'self.mail = "himalaya"\nsubprocess.run([self.mail, "message", "send"])',
+        'cfg.client = "himalaya"\nrun([cfg.client, "message", "send"])',
+        # Structure inside a string is not structure: an unmatched bracket in
+        # one does not open a call, and a `#` in one does not start a comment.
+        'f("a # b")\nclient="himalaya"\nsubprocess.run([client, "message", "send"])',
+        's = "("\nclient="himalaya"\nrun([client, "message", "send"])',
+        '# f(help="himalaya config")\nusage = "himalaya"\nrun([usage, "send"])',
+        # A period in a comment or an Ellipsis is not an attribute dot.
+        '# Configure the mail client.\nprog = "himalaya"\nsubprocess.run([prog, "message", "send"])',
+        'def f():\n    ...\nprog = "himalaya"\nrun([prog, "message", "send"])',
+        'x = 1  # see docs.\nusage = "himalaya"\nrun([usage, "send"])',
+        # A float without a fraction ends in a digit and a dot, not a name.
+        'alpha = 1.\nprog = "himalaya"\nsubprocess.run([prog, "message", "send"])',
+        'def f():\n    return 1.\nprog = "himalaya"\nrun([prog, "send"])',
+        # An exempt label must not silence the rest of the file.
+        'p.add_argument("--x", help="himalaya config")\nprog = "himalaya"\n'
+        'subprocess.run([prog, "message", "send"])',
+    ])
+    def test_a_real_assignment_naming_the_mail_client_still_asks(self, text):
+        found, key, _ = detect_outbound_action(text)
+        assert found and key == "outbound:email"
+
+    def test_a_long_label_dense_help_text_is_read_to_the_end(self):
+        # One pass, not one rescan per label: every line here names the client
+        # in a help string, and none of them is a send.
+        text = "\n".join(
+            f'p.add_argument("--opt{i}", help="himalaya config for mailbox {i}")'
+            for i in range(200))
+        assert detect_outbound_action(text)[0] is False
+
+    @pytest.mark.parametrize("quote", ['"""', "'''"])
+    def test_an_unterminated_docstring_with_escapes_stays_linear(self, quote):
+        # An unterminated `"""` used to make the tokenizer try every way to
+        # split a backslash pair: a few hundred bytes took seconds and a
+        # truncated 256 KiB script would never return.  The walk stays linear
+        # now, for both of the docstring quotings.  Twenty-two escapes make the
+        # old walk take seconds rather than minutes, so this fails on the timer
+        # instead of hanging the suite.
+        text = (quote + 'Mail helper.\n\n'
+                + 'x = re.compile(r"\\d+")\n' * 22
+                + 'client = "himalaya"\n')
+        started = time.monotonic()
+        found, key, _ = detect_outbound_action(text)
+        assert found and key == "outbound:email"
+        assert time.monotonic() - started < 2.0
+
+    @pytest.mark.parametrize("text", [
+        'def send(prog="himalaya"):\n    subprocess.run([prog, "message", "send"])',
+        'def send(a,\n         prog="himalaya"):\n    subprocess.run([prog, "message", "send"])',
+        'class Send(prog="himalaya"):\n    run([prog, "message", "send"])',
+        'HELP="himalaya"\nsubprocess.run([HELP, "message", "send"])',
+        # PEP 695 generic heads open a bracket like any signature.
+        'def f[T](prog="himalaya"):\n    run([prog, "message", "send"])',
+        'class C[T](prog="himalaya"):\n    run([prog, "message", "send"])',
+        # A prose value in a signature default is still not a call argument.
+        'def send(help="himalaya config"):\n    pass',
+        'class C(help="himalaya config"):\n    pass',
+    ])
+    def test_a_signature_default_is_not_a_label(self, text):
+        # A `def` opens a bracket, but its default then names the mail client
+        # for a real send.
+        found, key, _ = detect_outbound_action(text)
+        assert found and key == "outbound:email"
+
+    def test_a_label_named_attribute_write_is_not_a_send(self):
+        # `parser.description = ...` is prose about the client, so a spaced
+        # attribute write whose name is a label stays silent — but the bare
+        # form, and any spaced attribute whose name is not a label, keeps
+        # base's reading of an attribute that may hold the client itself.
+        assert detect_outbound_action(
+            'parser.description = "himalaya login"')[0] is False
+        assert detect_outbound_action(
+            'parser.description = "himalaya"')[0] is False
+        assert detect_outbound_action(
+            'parser .description = "himalaya login"')[0] is False
+        assert detect_outbound_action(
+            'parser\t.description = "himalaya login"')[0] is False
+        # The whitespace classes on both sides of the dot matter: a form feed
+        # is intra-line whitespace in Python too.
+        assert detect_outbound_action(
+            'parser. description = "himalaya login"')[0] is False
+        assert detect_outbound_action(
+            'parser.\tdescription = "himalaya login"')[0] is False
+        assert detect_outbound_action(
+            'parser\f.description = "himalaya login"')[0] is False
+        assert detect_outbound_action(
+            'parser.\fdescription = "himalaya login"')[0] is False
+        assert detect_outbound_action(
+            'parser.description="himalaya login"')[0] is True
+
+    def test_a_docstring_quote_does_not_hide_a_label(self):
+        # A `"` inside a docstring used to end the scrub early and leave the
+        # label below counted as a send.
+        text = ('"""a " b"""\n'
+                'parser.add_argument("setup", help="himalaya config")\n')
+        assert detect_outbound_action(text)[0] is False
+
+    def test_an_upper_case_label_is_not_a_send(self):
+        # Label names are compared case-insensitively.
+        assert detect_outbound_action(
+            'parser.add_argument("x", HELP="himalaya config")')[0] is False
+
+    def test_a_read_only_wrapper_still_asks(self):
+        # Accepted over-ask: with the client in a plain variable the guard
+        # cannot tell a read from a send, and asking is the safe direction.
+        found, key, _ = detect_outbound_action(
+            'HIMALAYA = "himalaya"\nrun([HIMALAYA, "message", "list"])')
+        assert found and key == "outbound:email"
