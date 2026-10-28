@@ -841,12 +841,16 @@ class TestInstalledCliOwnSourceNeverAsks:
             for i in range(200))
         assert detect_outbound_action(text)[0] is False
 
-    def test_an_unterminated_docstring_with_escapes_stays_linear(self):
+    @pytest.mark.parametrize("quote", ['"""', "'''"])
+    def test_an_unterminated_docstring_with_escapes_stays_linear(self, quote):
         # An unterminated `"""` used to make the tokenizer try every way to
-        # split a backslash pair: ~500 bytes took seconds and a truncated
-        # 256 KiB script would never return.  The walk stays linear now.
-        text = ('"""Mail helper.\n\n'
-                + 'x = re.compile(r"\\d+")\n' * 30
+        # split a backslash pair: a few hundred bytes took seconds and a
+        # truncated 256 KiB script would never return.  The walk stays linear
+        # now, for both of the docstring quotings.  Twenty-two escapes make the
+        # old walk take seconds rather than minutes, so this fails on the timer
+        # instead of hanging the suite.
+        text = (quote + 'Mail helper.\n\n'
+                + 'x = re.compile(r"\\d+")\n' * 22
                 + 'client = "himalaya"\n')
         started = time.monotonic()
         found, key, _ = detect_outbound_action(text)
