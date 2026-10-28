@@ -864,6 +864,10 @@ class TestInstalledCliOwnSourceNeverAsks:
         assert detect_outbound_action(
             'parser.description = "himalaya"')[0] is False
         assert detect_outbound_action(
+            'parser .description = "himalaya login"')[0] is False
+        assert detect_outbound_action(
+            'parser\t.description = "himalaya login"')[0] is False
+        assert detect_outbound_action(
             'parser.description="himalaya login"')[0] is True
 
     def test_a_docstring_quote_does_not_hide_a_label(self):
