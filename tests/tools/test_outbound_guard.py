@@ -847,6 +847,9 @@ class TestInstalledCliOwnSourceNeverAsks:
         # PEP 695 generic heads open a bracket like any signature.
         'def f[T](prog="himalaya"):\n    run([prog, "message", "send"])',
         'class C[T](prog="himalaya"):\n    run([prog, "message", "send"])',
+        # A prose value in a signature default is still not a call argument.
+        'def send(help="himalaya config"):\n    pass',
+        'class C(help="himalaya config"):\n    pass',
     ])
     def test_a_signature_default_is_not_a_label(self, text):
         # A `def` opens a bracket, but its default then names the mail client
@@ -867,6 +870,14 @@ class TestInstalledCliOwnSourceNeverAsks:
             'parser .description = "himalaya login"')[0] is False
         assert detect_outbound_action(
             'parser\t.description = "himalaya login"')[0] is False
+        # The whitespace classes on both sides of the dot matter: a form feed
+        # is intra-line whitespace in Python too.
+        assert detect_outbound_action(
+            'parser. description = "himalaya login"')[0] is False
+        assert detect_outbound_action(
+            'parser.\tdescription = "himalaya login"')[0] is False
+        assert detect_outbound_action(
+            'parser\f.description = "himalaya login"')[0] is False
         assert detect_outbound_action(
             'parser.description="himalaya login"')[0] is True
 

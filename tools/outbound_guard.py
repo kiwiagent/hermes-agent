@@ -73,7 +73,7 @@ _PROSE_RE = re.compile(r"""[a-z_]\w*\s*=\s*['"]?himalaya\b\s""", _FLAGS)
 _PARSER_CALLEE_RE = re.compile(
     r"(?:^|\.)(?:add_argument|add_parser|argumentparser)$", _FLAGS)
 _SIGNATURE_RE = re.compile(r"\b(?:def|class)\s+\w+(?:\[[^\]\n]*\])?\s*$")
-_ATTRIBUTE_RE = re.compile(r"[\w)\]][ \t]*\.[ \t]*\Z")
+_ATTRIBUTE_RE = re.compile(r"[\w)\]][^\S\n]*\.[^\S\n]*\Z")
 
 # What a bracket counter must step over rather than count: strings, comments,
 # docstrings — matched at C speed, so a label-dense file costs one scan.
