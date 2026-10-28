@@ -816,6 +816,10 @@ class TestInstalledCliOwnSourceNeverAsks:
         'f("a # b")\nclient="himalaya"\nsubprocess.run([client, "message", "send"])',
         's = "("\nclient="himalaya"\nrun([client, "message", "send"])',
         '# f(help="himalaya config")\nusage = "himalaya"\nrun([usage, "send"])',
+        # A period in a comment or an Ellipsis is not an attribute dot.
+        '# Configure the mail client.\nprog = "himalaya"\nsubprocess.run([prog, "message", "send"])',
+        'def f():\n    ...\nprog = "himalaya"\nrun([prog, "message", "send"])',
+        'x = 1  # see docs.\nusage = "himalaya"\nrun([usage, "send"])',
     ])
     def test_a_real_assignment_naming_the_mail_client_still_asks(self, text):
         found, key, _ = detect_outbound_action(text)
@@ -851,6 +855,8 @@ class TestInstalledCliOwnSourceNeverAsks:
         # base's reading of an attribute that may hold the client itself.
         assert detect_outbound_action(
             'parser.description = "himalaya login"')[0] is False
+        assert detect_outbound_action(
+            'parser.description = "himalaya"')[0] is False
         assert detect_outbound_action(
             'parser.description="himalaya login"')[0] is True
 

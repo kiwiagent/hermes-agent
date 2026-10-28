@@ -58,9 +58,10 @@ _EMAIL_PATTERNS = [
 # "himalaya")`` are labels, while ``send(prog="himalaya")`` passes the client
 # and still asks — the name alone does not exempt a bare value. An assignment
 # in a call's argument list with a label name is a label, and a signature
-# default is not an argument. ``x.description = "…himalaya login"`` is prose
-# with spaces around ``=``; every other spelling counts, including a bare
-# ``cfg.client=…`` and a spaced ``self.mail = …`` that holds the client.
+# default is not an argument. A spaced ``x.description = …`` attribute write
+# is a label because the attribute *is* one of those names; every other
+# spelling counts, including a bare ``cfg.client=…`` and a spaced
+# ``self.mail = …`` that holds the client.
 _HIMALAYA_VAR_RE = re.compile(r"""(?<!\w)([a-z_]\w*)=['"]?himalaya\b""", _FLAGS)
 _HIMALAYA_SPACED_VAR_RE = re.compile(
     r"""(?<!\w)([a-z_]\w*)\s*=\s*['"]?himalaya\b""", _FLAGS)
@@ -72,8 +73,7 @@ _PROSE_RE = re.compile(r"""[a-z_]\w*\s*=\s*['"]?himalaya\b\s""", _FLAGS)
 _PARSER_CALLEE_RE = re.compile(
     r"(?:^|\.)(?:add_argument|add_parser|argumentparser)$", _FLAGS)
 _SIGNATURE_RE = re.compile(r"\b(?:def|class)\s+\w+(?:\[[^\]\n]*\])?\s*$")
-_CALLEE_RE = re.compile(r"([A-Za-z_][\w.]*)\s*$")
-_ATTRIBUTE_RE = re.compile(r"\.\s*$")
+_ATTRIBUTE_RE = re.compile(r"[\w)\]]\.\s*$")
 
 # What a bracket counter must step over rather than count: strings, comments,
 # docstrings — matched at C speed, so a label-dense file costs one scan.
@@ -85,6 +85,15 @@ _STRUCTURE_RE = re.compile(
     r"|'(?:\\.|[^'\\\n])*'"
     r"|[()\[\]{}]"
 )
+
+
+def _callee(tail: str) -> str:
+    """The dotted name a call's ``(`` belongs to, lower-cased (empty if none)."""
+    tail = tail.rstrip()
+    start = len(tail)
+    while start and (tail[start - 1].isalnum() or tail[start - 1] in "_."):
+        start -= 1
+    return tail[start:].lower()
 
 
 def _himalaya_hidden_in_a_variable(text: str) -> bool:
@@ -119,8 +128,7 @@ def _himalaya_hidden_in_a_variable(text: str) -> bool:
                     if bracket == "(" and _SIGNATURE_RE.search(tail):
                         calls.append((True, ""))
                     else:
-                        callee = _CALLEE_RE.search(tail)
-                        calls.append((False, callee.group(1).lower() if callee else ""))
+                        calls.append((False, _callee(tail)))
                 elif calls:
                     calls.pop()
                 last = bracket
@@ -142,7 +150,7 @@ def _himalaya_hidden_in_a_variable(text: str) -> bool:
                         or _PARSER_CALLEE_RE.search(calls[-1][1])):
                     continue
             # ``x.description = "himalaya login"`` is prose, not a client.
-            elif spaced and _ATTRIBUTE_RE.search(text[:start]):
+            elif spaced and _ATTRIBUTE_RE.search(tail):
                 continue
         return True
     return False
