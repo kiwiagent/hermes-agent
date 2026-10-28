@@ -41,12 +41,11 @@ _EMAIL_PATTERNS = [
     # split by quotes ('mess''age' send), or himalaya hidden in a variable.
     r"""\bhimalaya\b[^\n;|&]*?(?:mess|msg|templ|tpl)['"a-z]*[\s,]+['"]?(?:send|write|compose|reply|forward|fwd)\b""",
     # The installed CLI's own source is exempt from the scan (see
-    # _is_platform_cli), so the mail client it configures is judged on the
-    # command line that runs it. The shipped CLI has no mail-send subcommand
-    # (its `mail unsubscribe` is cardless by the plugin's contract test in
-    # smartbuddy-hermes-plugin tests/test_sb_cli.py); one that ships needs a
-    # rule of its own here, and a himalaya run it starts is caught by the
-    # patterns above whether or not the code was read from a file.
+    # _is_platform_cli): no rule applies to that file's text, so the mail
+    # client it configures is judged on the command line that runs it. The
+    # shipped CLI has no mail-send subcommand (its `mail unsubscribe` is
+    # cardless by the plugin's contract test in smartbuddy-hermes-plugin
+    # tests/test_sb_cli.py); one that ships needs a rule of its own here.
 ]
 
 # himalaya hidden in a variable: ``client = "himalaya"`` then
@@ -54,17 +53,27 @@ _EMAIL_PATTERNS = [
 # the client for a human is not — an argparse
 # ``help="himalaya config for every connected mailbox"`` was the 2026-10-28
 # card that showed on every SmartBuddy turn, and ``usage=``/``prog=`` etc. read
-# the same way. Position gates first, then the name: an assignment in a call's
-# argument list with a label name is a label, and a signature default is not an
-# argument. Everything else counts, with or without spaces around ``=`` — but
-# spaces are only read for a plain name, because ``parser.description = …`` is
-# prose about the client, while a bare ``cfg.client=…`` is the old base reading.
+# the same way. What makes it a label is the prose, or an argument-parser
+# call: ``help="himalaya config …"`` in any call and ``ArgumentParser(prog=
+# "himalaya")`` are labels, while ``send(prog="himalaya")`` passes the client
+# and still asks — the name alone does not exempt a bare value. An assignment
+# in a call's argument list with a label name is a label, and a signature
+# default is not an argument. ``x.description = "…himalaya login"`` is prose
+# with spaces around ``=``; every other spelling counts, including a bare
+# ``cfg.client=…`` and a spaced ``self.mail = …`` that holds the client.
 _HIMALAYA_VAR_RE = re.compile(r"""(?<!\w)([a-z_]\w*)=['"]?himalaya\b""", _FLAGS)
 _HIMALAYA_SPACED_VAR_RE = re.compile(
-    r"""(?<!\.)(?<!\w)([a-z_]\w*)\s*=\s*['"]?himalaya\b""", _FLAGS)
+    r"""(?<!\w)([a-z_]\w*)\s*=\s*['"]?himalaya\b""", _FLAGS)
 _LABEL_KWARGS = frozenset(
     {"help", "description", "metavar", "dest", "usage", "epilog", "prog"})
-_SIGNATURE_RE = re.compile(r"\b(?:def|class)\s+\w+\s*$")
+# A label reads on as prose (``"himalaya config for …"``) or is a keyword of
+# the argument parser itself (``ArgumentParser(prog="himalaya")``).
+_PROSE_RE = re.compile(r"""[a-z_]\w*\s*=\s*['"]?himalaya\b\s""", _FLAGS)
+_PARSER_CALLEE_RE = re.compile(
+    r"(?:^|\.)(?:add_argument|add_parser|argumentparser)$", _FLAGS)
+_SIGNATURE_RE = re.compile(r"\b(?:def|class)\s+\w+(?:\[[^\]\n]*\])?\s*$")
+_CALLEE_RE = re.compile(r"([A-Za-z_][\w.]*)\s*$")
+_ATTRIBUTE_RE = re.compile(r"\.\s*$")
 
 # What a bracket counter must step over rather than count: strings, comments,
 # docstrings — matched at C speed, so a label-dense file costs one scan.
@@ -79,21 +88,25 @@ _STRUCTURE_RE = re.compile(
 
 
 def _himalaya_hidden_in_a_variable(text: str) -> bool:
-    """True when the text names the mail client outside a human-facing label."""
+    """True when the text names the mail client where it could be sent with.
+
+    A label for a human — prose in a keyword argument, or the argument
+    parser's own keywords — does not count; see the patterns' comment.
+    """
     mentions = sorted(
-        (m.start(), m.group(1).lower())
-        for pattern in (_HIMALAYA_VAR_RE, _HIMALAYA_SPACED_VAR_RE)
-        for m in pattern.finditer(text)
+        [(m.start(), m.group(1).lower(), False) for m in _HIMALAYA_VAR_RE.finditer(text)]
+        + [(m.start(), m.group(1).lower(), True)
+           for m in _HIMALAYA_SPACED_VAR_RE.finditer(text)]
     )
     if not mentions:
         return False
-    calls: list[bool] = []  # per open bracket: opened by a def/class head?
+    calls: list[tuple[bool, str]] = []  # per open bracket: def/class head, callee
     last = ""  # last visible character before the cursor
-    tail = ""  # visible text, for the def/class lookback
+    tail = ""  # visible text, for the def/class and callee lookbacks
     tokens = _STRUCTURE_RE.finditer(text)
     token = next(tokens, None)
     cursor = 0
-    for start, name in mentions:
+    for start, name, spaced in mentions:
         while token is not None and token.start() < start:
             raw = text[cursor:token.start()]
             tail = (tail + raw)[-256:]
@@ -103,7 +116,11 @@ def _himalaya_hidden_in_a_variable(text: str) -> bool:
             bracket = token.group() if token.group() in "([{)]}" else ""
             if bracket:
                 if bracket in "([{":
-                    calls.append(bool(_SIGNATURE_RE.search(tail)))
+                    if bracket == "(" and _SIGNATURE_RE.search(tail):
+                        calls.append((True, ""))
+                    else:
+                        callee = _CALLEE_RE.search(tail)
+                        calls.append((False, callee.group(1).lower() if callee else ""))
                 elif calls:
                     calls.pop()
                 last = bracket
@@ -115,11 +132,18 @@ def _himalaya_hidden_in_a_variable(text: str) -> bool:
         run = raw.rstrip()
         if run:
             last = run[-1]
-        # An argument boundary inside a call makes a label; a signature's
-        # default is not an argument, so ``def send(prog="himalaya")`` counts.
-        if (name in _LABEL_KWARGS and calls and not calls[-1]
-                and last and last in ",(["):
-            continue
+        cursor = max(cursor, start)
+        if name in _LABEL_KWARGS:
+            # An argument boundary inside a call makes a label; a signature's
+            # default is not an argument, so ``def send(prog="himalaya")``
+            # counts, and so does a bare value passed to an ordinary callee.
+            if calls and not calls[-1][0] and last and last in ",([":
+                if (_PROSE_RE.match(text, start)
+                        or _PARSER_CALLEE_RE.search(calls[-1][1])):
+                    continue
+            # ``x.description = "himalaya login"`` is prose, not a client.
+            elif spaced and _ATTRIBUTE_RE.search(text[:start]):
+                continue
         return True
     return False
 
