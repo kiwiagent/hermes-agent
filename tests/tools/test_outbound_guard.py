@@ -820,6 +820,12 @@ class TestInstalledCliOwnSourceNeverAsks:
         '# Configure the mail client.\nprog = "himalaya"\nsubprocess.run([prog, "message", "send"])',
         'def f():\n    ...\nprog = "himalaya"\nrun([prog, "message", "send"])',
         'x = 1  # see docs.\nusage = "himalaya"\nrun([usage, "send"])',
+        # A float without a fraction ends in a digit and a dot, not a name.
+        'alpha = 1.\nprog = "himalaya"\nsubprocess.run([prog, "message", "send"])',
+        'def f():\n    return 1.\nprog = "himalaya"\nrun([prog, "send"])',
+        # An exempt label must not silence the rest of the file.
+        'p.add_argument("--x", help="himalaya config")\nprog = "himalaya"\n'
+        'subprocess.run([prog, "message", "send"])',
     ])
     def test_a_real_assignment_naming_the_mail_client_still_asks(self, text):
         found, key, _ = detect_outbound_action(text)
