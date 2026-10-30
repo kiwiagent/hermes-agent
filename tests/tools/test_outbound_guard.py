@@ -58,6 +58,26 @@ class TestEmail:
     def test_reading_mail_with_himalaya_is_not_outbound(self, text):
         assert detect_outbound_action(text)[0] is False
 
+    # `template write/reply/forward` only print a template to stdout; the
+    # mail goes out when it is piped into `template send`.
+    @pytest.mark.parametrize("text", [
+        "himalaya template write -a me@x.co",
+        "himalaya template reply -a me@x.co 42",
+        "himalaya tpl forward 42 > fwd.eml",
+        "himalaya 'templ''ate' write",
+    ])
+    def test_printing_a_template_is_not_outbound(self, text):
+        assert detect_outbound_action(text)[0] is False
+
+    @pytest.mark.parametrize("text", [
+        "himalaya template reply 42 | sed 's/^$/\\nThanks\\n/' | himalaya template send",
+        "himalaya template forward 42 | himalaya template send -a me@x.co",
+        "himalaya 'templ''ate' send < t.eml",
+    ])
+    def test_a_template_piped_into_send_is_outbound(self, text):
+        found, key, _ = detect_outbound_action(text)
+        assert found and key == "outbound:email", text
+
 
 class TestMessages:
     @pytest.mark.parametrize("text", [
