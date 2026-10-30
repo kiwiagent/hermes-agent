@@ -15,6 +15,8 @@ requests/httpx writes, chat webhooks). It is a guard rail, not a sandbox.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shlex
@@ -35,11 +37,15 @@ _EMAIL_PATTERNS = [
     r"\b(?:messages|drafts)\(\)\s*\.\s*send\s*\(",
     r"gmail\.googleapis\.com/\S*/(?:messages|drafts)/send",
     # himalaya (SmartBuddy mail skill): message send/write/compose/reply/forward,
-    # template send — also as a subprocess argument list. Reads don't match.
-    r"""\bhimalaya\b[^\n;|&]*?\b(?:message|msg|template|tpl)['"]?[\s,'"]+(?:send|write|compose|reply|forward|fwd)\b""",
+    # template send — also as a subprocess argument list. Reads don't match,
+    # and neither does `template write/reply/forward`: those only print a
+    # template to stdout; it goes out when piped into `template send`.
+    r"""\bhimalaya\b[^\n;|&]*?\b(?:message|msg)['"]?[\s,'"]+(?:send|write|compose|reply|forward|fwd)\b""",
+    r"""\bhimalaya\b[^\n;|&]*?\b(?:template|tpl)['"]?[\s,'"]+send\b""",
     # kiwiagent (security review 2026-10-27): the same with the subcommand
     # split by quotes ('mess''age' send), or himalaya hidden in a variable.
-    r"""\bhimalaya\b[^\n;|&]*?(?:mess|msg|templ|tpl)['"a-z]*[\s,]+['"]?(?:send|write|compose|reply|forward|fwd)\b""",
+    r"""\bhimalaya\b[^\n;|&]*?(?:mess|msg)['"a-z]*[\s,]+['"]?(?:send|write|compose|reply|forward|fwd)\b""",
+    r"""\bhimalaya\b[^\n;|&]*?(?:templ|tpl)['"a-z]*[\s,]+['"]?send\b""",
     # The installed CLI's own source is exempt from the scan (see
     # _is_platform_cli): no rule applies to that file's text, so the mail
     # client it configures is judged on the command line that runs it. The
@@ -694,6 +700,253 @@ def detect_outbound_script_file(path: str) -> OutboundMatch:
         source, platform_cli_source=_is_platform_cli(resolved))
 
 
+# --- Send targets: is this the same send the user just allowed? ----------------
+# A failed send is usually retried with a slightly different command line (a
+# redirect added, the draft piped instead of passed). The target is what the
+# user approved on the card: the draft file with its content (and the mailbox
+# it goes from), or the Facebook post's text and photos. Anything this can't
+# read with certainty has no target, and then every attempt asks as before.
+
+# Expansions, here-docs and multi-line scripts: the words the command runs
+# with can't be read from its text.
+_TARGET_UNREADABLE_RE = re.compile(r"[\n\r`$]|<<")
+_TARGET_SEPARATORS = frozenset({";", "&&", "||", "|", "|&", "&"})
+_TARGET_REDIRECTS = frozenset({">", ">>", ">&", "&>", "&>>", ">|", "<"})
+_SHELL_OPERATOR_CHARS = frozenset("();<>|&")
+# What may read the send's output (`… | tail -5`): none of them writes a file.
+_OUTPUT_READERS = frozenset({"head", "tail", "jq", "cat", "grep"})
+_HIMALAYA_VALUE_FLAGS = {"-a": "account", "--account": "account", "-c": "config", "--config": "config",
+                         "-o": None, "--output": None, "--log-level": None}
+_HIMALAYA_SWITCHES = frozenset({"--no-save", "--debug", "--trace", "-q", "--quiet"})
+_FACEBOOK_POST_OPTIONS = frozenset({"--message", "--photo", "--recent-photos", "--link", "--at"})
+_SMARTBUDDY_MEDIA_EXT = (".jpg", ".jpeg", ".png", ".gif")
+
+
+class _Segment(NamedTuple):
+    words: list
+    stdin: Optional[str]
+    piped: bool  # stdin comes from the segment before
+
+
+def _target_segments(command: str) -> Optional[list]:
+    """The command's simple commands (words, ``<`` file, piped-in flag), or
+    None when it is more than plain words, lists and pipes, or writes a file
+    (a redirect could rewrite the draft before it is sent)."""
+    if _TARGET_UNREADABLE_RE.search(command):
+        return None
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""  # shlex ends a word at `#`; the shell doesn't (hi#tag)
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    segments, words, stdin, piped = [], [], None, False
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _TARGET_SEPARATORS:
+            if not words:
+                return None
+            segments.append(_Segment(words, stdin, piped))
+            words, stdin, piped = [], None, tok in ("|", "|&")
+        elif tok in _TARGET_REDIRECTS:
+            target = tokens[i + 1] if i + 1 < len(tokens) else ""
+            if not target or set(target) <= _SHELL_OPERATOR_CHARS:
+                return None
+            if tok == "<":
+                if stdin is not None:
+                    return None
+                stdin = target
+            elif target != "/dev/null" and not (tok == ">&" and target.isdigit()):
+                return None
+            elif words and words[-1].isdigit():
+                words.pop()  # the fd of `2>&1` / `2>/dev/null`
+            i += 1
+        elif set(tok) <= _SHELL_OPERATOR_CHARS:
+            return None  # a subshell or any other operator
+        else:
+            words.append(tok)
+        i += 1
+    if not words:
+        return None
+    segments.append(_Segment(words, stdin, piped))
+    return segments
+
+
+def _file_fingerprint(raw: str) -> Optional[str]:
+    """Absolute path and content hash of a file the send reads. A relative
+    path is resolved by the shell's own working directory, not ours: None."""
+    path = os.path.expanduser(raw)
+    if not os.path.isabs(path):
+        return None
+    path = os.path.realpath(path)
+    try:
+        if not os.path.isfile(path):
+            return None
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return f"{path}#{digest.hexdigest()}"
+
+
+def _option_value(args: list, i: int) -> tuple[str, Optional[str], int]:
+    """(name, value, next index) of the option at ``args[i]`` (``--x=v`` or ``--x v``)."""
+    name, eq, attached = args[i].partition("=")
+    if eq:
+        return name, attached, i + 1
+    return name, (args[i + 1] if i + 1 < len(args) else None), i + 2
+
+
+def _himalaya_send(words: list) -> Optional[tuple[dict, list]]:
+    """(identity options, positional args) of ``himalaya message|template send``;
+    None for any other himalaya call or an option this can't account for."""
+    if not words or os.path.basename(words[0]) != "himalaya":
+        return None
+    options, positional, subcommand, i, rest = {}, [], [], 1, False
+    while i < len(words):
+        word = words[i]
+        if rest or not word.startswith("-") or word == "-":
+            (positional if len(subcommand) == 2 else subcommand).append(word)
+            i += 1
+        elif word == "--":
+            rest, i = True, i + 1
+        elif word in _HIMALAYA_SWITCHES:
+            i += 1
+        else:
+            name, value, i = _option_value(words, i)
+            if name not in _HIMALAYA_VALUE_FLAGS or value is None:
+                return None
+            if _HIMALAYA_VALUE_FLAGS[name]:
+                if _HIMALAYA_VALUE_FLAGS[name] in options:
+                    return None
+                options[_HIMALAYA_VALUE_FLAGS[name]] = value
+    if subcommand not in (["message", "send"], ["msg", "send"], ["template", "send"], ["tpl", "send"]):
+        return None
+    return options, positional
+
+
+def _email_target(segments: list) -> Optional[tuple[str, set]]:
+    sends = [i for i, s in enumerate(segments) if _himalaya_send(s.words) is not None]
+    if len(sends) != 1:
+        return None
+    index = sends[0]
+    send = segments[index]
+    options, sources = _himalaya_send(send.words)
+    used = {index}
+    if send.stdin is not None:
+        sources = sources + [send.stdin]
+    if send.piped:
+        feeder = segments[index - 1]
+        if feeder.words[0] != "cat" or len(feeder.words) != 2 or feeder.stdin or feeder.piped:
+            return None
+        sources = sources + [feeder.words[1]]
+        used.add(index - 1)
+    if len(sources) != 1:
+        return None
+    draft = _file_fingerprint(sources[0])
+    if draft is None:
+        return None
+    return json.dumps({"draft": draft, **options}, sort_keys=True), used
+
+
+def _is_smartbuddy_cli(words: list) -> int:
+    """Index of the ``facebook`` word after the platform CLI, else -1."""
+    start = 1 if words and re.fullmatch(r"python[\d.]*", os.path.basename(words[0])) else 0
+    if len(words) <= start + 1:
+        return -1
+    cli = words[start]
+    if cli != "sb" and not _is_platform_cli(cli):
+        return -1
+    return start + 1 if words[start + 1] == "facebook" else -1
+
+
+def _recent_photos_fingerprint(count: str) -> Optional[list]:
+    """The last ``count`` photos the user sent (what ``--recent-photos`` posts),
+    from the folder the SmartBuddy adapter saves them in; None if unsure."""
+    from hermes_constants import get_hermes_home
+    if not count.isdigit() or int(count) < 1:
+        return None
+    media = os.path.join(str(get_hermes_home()), "tmp", "smartbuddy_media")
+    try:
+        files = [os.path.join(media, f) for f in os.listdir(media) if f.lower().endswith(_SMARTBUDDY_MEDIA_EXT)]
+        files.sort(key=os.path.getmtime)
+    except OSError:
+        return None
+    if len(files) < int(count):
+        return None
+    prints = [_file_fingerprint(f) for f in files[-int(count):]]
+    return None if None in prints else prints
+
+
+def _facebook_post_args(args: list) -> Optional[dict]:
+    post, i = {"photo": []}, 0
+    while i < len(args):
+        name, value, i = _option_value(args, i)
+        if name not in _FACEBOOK_POST_OPTIONS or value is None:
+            return None
+        key = name[2:]
+        if key == "photo":
+            photo = value if value.startswith("https://") else _file_fingerprint(value)
+            if photo is None:
+                return None
+            post["photo"].append(photo)
+            continue
+        if key in post:
+            return None
+        if key == "recent-photos":
+            value = _recent_photos_fingerprint(value)
+            if value is None:
+                return None
+        post[key] = value
+    return post
+
+
+def _publish_target(segments: list) -> Optional[tuple[str, set]]:
+    posts = [(i, _is_smartbuddy_cli(s.words)) for i, s in enumerate(segments)]
+    posts = [(i, at) for i, at in posts if at >= 0]
+    if len(posts) != 1:
+        return None
+    index, at = posts[0]
+    words = segments[index].words
+    action, args = (words[at + 1] if len(words) > at + 1 else ""), words[at + 2:]
+    if action == "delete" and len(args) == 1 and not args[0].startswith("-"):
+        target = {"delete": args[0]}
+    elif action == "post":
+        target = _facebook_post_args(args)
+        if target is None:
+            return None
+    else:
+        return None
+    return json.dumps(target, sort_keys=True), {index}
+
+
+_TARGET_READERS = {"outbound:email": _email_target, "outbound:publish": _publish_target}
+
+
+def outbound_send_target(command: str, key: Optional[str]) -> Optional[str]:
+    """What the one send in ``command`` goes to, for an ``outbound:email`` or
+    ``outbound:publish`` key: the same string means the same send. None when
+    the command does anything besides the send and reading its output, or the
+    target can't be read."""
+    reader = _TARGET_READERS.get(key or "")
+    segments = _target_segments(command or "") if reader else None
+    found = reader(segments) if segments else None
+    if found is None:
+        return None
+    target, used = found
+    last = max(used)
+    for i, segment in enumerate(segments):
+        if i in used:
+            continue
+        if i < last or not segment.piped or os.path.basename(segment.words[0]) not in _OUTPUT_READERS:
+            return None
+    return f"{key}:{target}"
+
+
 __all__ = [
     "PUBLISH_AS_USER_HOSTS",
     "allowable_http_host",
@@ -701,4 +954,5 @@ __all__ = [
     "detect_outbound_command",
     "detect_outbound_script_file",
     "is_publish_host",
+    "outbound_send_target",
 ]

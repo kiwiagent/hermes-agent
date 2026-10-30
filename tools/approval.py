@@ -17,6 +17,7 @@ import importlib
 import logging
 import os
 import threading
+from time import monotonic as _monotonic
 from typing import Optional
 
 from utils import env_var_enabled, is_truthy_value
@@ -55,6 +56,10 @@ _session_yolo: set[str] = set()
 _permanent_approved: set = set()
 # Routed multiplex profiles: one permanent allowlist per profile home (see ``_permanent_set``).
 _permanent_approved_by_home: dict[str, set] = {}
+# kiwiagent: sends the user allowed, per session: (outbound key, send target) -> expiry (monotonic).
+# A retry of the same send within the window is not asked again (see ``_is_outbound_retry``).
+_OUTBOUND_RETRY_SECONDS = 600
+_outbound_allowed: dict[str, dict[tuple[str, str], float]] = {}
 
 # --- Consecutive-denial circuit breaker for smart approvals ---------------------------------------------------------
 # Each retry of a smart-denied command burns another guardian LLM call. After ``approvals.denial_breaker_threshold``
@@ -289,6 +294,7 @@ def clear_session(session_key: str) -> None:
         return
     with _lock:
         _session_approved.pop(session_key, None)
+        _outbound_allowed.pop(session_key, None)
         _session_yolo.discard(session_key)
         _pending.pop(session_key, None)
         for entry in _gateway_queues.pop(session_key, []):
@@ -567,6 +573,29 @@ def _outbound_can_be_permanent(key: Optional[str]) -> bool:
     always-allowed. Email, messages and publishing as the user never."""
     from tools.outbound_guard import allowable_http_host
     return allowable_http_host(key) is not None
+
+
+def _remember_outbound_send(session_key: str, key: str, target: str) -> None:
+    """The user allowed this send: a retry of it is not asked again for a while."""
+    with _lock:
+        _outbound_allowed.setdefault(session_key, {})[(key, target)] = _monotonic() + _OUTBOUND_RETRY_SECONDS
+
+
+def _is_outbound_retry(session_key: str, key: str, target: Optional[str]) -> bool:
+    """True when the user allowed this same send (same key and target) in this
+    session less than ``_OUTBOUND_RETRY_SECONDS`` ago. A failed send is retried
+    with a slightly different command line; asking again for it is noise, while
+    anything with another target still asks."""
+    if not target:
+        return False
+    with _lock:
+        allowed = _outbound_allowed.get(session_key)
+        if not allowed:
+            return False
+        now = _monotonic()
+        for entry in [e for e, expiry in allowed.items() if expiry <= now]:
+            del allowed[entry]
+        return (key, target) in allowed
 
 
 def _outbound_host_allowed(key: Optional[str]) -> bool:
@@ -870,7 +899,7 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
                     pattern_key: str, pattern_keys: list[str],
                     session_key: str, approval_callback, is_cli: bool, is_gateway: bool,
                     is_ask: bool, smart: bool = False, pending_body=None,
-                    outbound_key: Optional[str] = None) -> dict:
+                    outbound_key: Optional[str] = None, outbound_target: Optional[str] = None) -> dict:
     """Ask a human (after the optional guardian-LLM step) and turn the answer into the gate result.
 
     ``pattern_keys`` are what :func:`_persist_choice` stores on session/always; a smart-DENY
@@ -912,6 +941,8 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
             with _lock:
                 snapshot = set(_permanent_set())
             save_permanent_allowlist(snapshot)
+        if outbound_key and outbound_target:
+            _remember_outbound_send(session_key, outbound_key, outbound_target)
         if spec.user_approved:
             return _user_approved(session_key, description)
         return _approved()
@@ -1277,7 +1308,14 @@ def check_all_command_guards(command: str, env_type: str,
     if not is_dangerous and not outbound:
         return _approved()
     if outbound:
-        # Never pre-approved: every send is its own decision.
+        # Never pre-approved: every send is its own decision — except a retry of
+        # the very send the user just allowed (same draft / same post).
+        from tools.outbound_guard import outbound_send_target
+        outbound_target = outbound_send_target(command, outbound_key)
+        if not is_dangerous and _is_outbound_retry(session_key, outbound_key, outbound_target):
+            logger.info("Outbound %s approved without asking: retry of a send the user allowed "
+                        "in session %s", outbound_key, session_key)
+            return _approved()
         keys = ([pattern_key] if is_dangerous else []) + [outbound_key]
         description = f"{description}; {outbound_desc}" if is_dangerous else outbound_desc
         return _human_decision(
@@ -1285,6 +1323,7 @@ def check_all_command_guards(command: str, env_type: str,
             pattern_key=keys[0], pattern_keys=keys,
             session_key=session_key, approval_callback=approval_callback,
             is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask, outbound_key=outbound_key,
+            outbound_target=outbound_target,
         )
     return _human_decision(
         _COMMAND_GATE, command=command, description=description,
