@@ -1805,6 +1805,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("GET", "/api/files/{b64_path}", self._handle_file_serve),
             ("GET", "/api/approvals/permanent", self._handle_list_permanent_approvals),
             ("DELETE", "/api/approvals/permanent", self._handle_revoke_permanent_approval),
+            ("GET", "/api/memory", self._handle_list_memory),
             ("POST", "/v1/chat/completions", self._handle_chat_completions),
             ("POST", "/v1/responses", self._handle_responses),
             ("GET", "/v1/responses/{response_id}", self._handle_get_response),
@@ -3712,6 +3713,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return web.json_response({"error": "key is required"}, status=400)
         from tools.approval import revoke_permanent
         return web.json_response({"removed": await asyncio.to_thread(revoke_permanent, key)})
+
+    async def _handle_list_memory(self, request: web.Request) -> web.Response:
+        """GET /api/memory — what the buddy has noted (MEMORY.md) and knows about the
+        user (USER.md), as written, for the app's 记 tab. Read-only: forgetting goes
+        through the chat so the memory tool removes it the normal way."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        from tools.memory_tool import load_on_disk_store
+        store = await asyncio.to_thread(load_on_disk_store)
+        return web.json_response({"memory": list(store.memory_entries), "user": list(store.user_entries)})
 
     @_admit_api_agent_request
     async def _handle_session_chat_stream(self, request: web.Request) -> web.StreamResponse:
