@@ -3,7 +3,7 @@ name: Build and Push to ACR
 # 只在 kiwiagent fork 上运行 —— 上游同名 workflow 无害地失败但不会占我们的时间
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, 'release/**']
     # The image copies the whole repo (Dockerfile `COPY . .`), so any code
     # change needs a build; only skip what never reaches the image. (The old
     # allow-list missed tools/ and gateway/, so those merges never deployed.)
