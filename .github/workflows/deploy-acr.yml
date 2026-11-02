@@ -39,21 +39,23 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      # main → :latest + :<sha> (unchanged). Any other branch (dev) → :dev-<sha>
+      # main → :latest + :main-<short>. Any other branch (dev) → :dev-<short>
       # only: a dev build must never move :latest, which is what a pod falls back
-      # to when no digest is pinned. gitops pins SMARTBUDDY_AGENT_IMAGE by digest,
-      # so a new tag deploys nothing by itself — bump the dev manifest to use it.
+      # to when no digest is pinned. The branch is in the tag so the registry
+      # listing says where an image came from. gitops pins SMARTBUDDY_AGENT_IMAGE
+      # by digest, so a new tag deploys nothing by itself — bump the manifest.
       - name: Work out the image tags
         id: tags
         run: |
           image="$ACR_REGISTRY/$ACR_NAMESPACE/hermes-agent"
+          short="${GITHUB_SHA::7}"
           {
             echo 'list<<TAGS'
             if [ "$GITHUB_REF_NAME" = "main" ]; then
               echo "${image}:latest"
-              echo "${image}:${GITHUB_SHA}"
+              echo "${image}:main-${short}"
             else
-              echo "${image}:dev-${GITHUB_SHA}"
+              echo "${image}:dev-${short}"
             fi
             echo 'TAGS'
           } >> "$GITHUB_OUTPUT"
