@@ -3,7 +3,7 @@ name: Build and Push to ACR
 # 只在 kiwiagent fork 上运行 —— 上游同名 workflow 无害地失败但不会占我们的时间
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     # The image copies the whole repo (Dockerfile `COPY . .`), so any code
     # change needs a build; only skip what never reaches the image. (The old
     # allow-list missed tools/ and gateway/, so those merges never deployed.)
@@ -39,6 +39,25 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
+      # main → :latest + :<sha> (unchanged). Any other branch (dev) → :dev-<sha>
+      # only: a dev build must never move :latest, which is what a pod falls back
+      # to when no digest is pinned. gitops pins SMARTBUDDY_AGENT_IMAGE by digest,
+      # so a new tag deploys nothing by itself — bump the dev manifest to use it.
+      - name: Work out the image tags
+        id: tags
+        run: |
+          image="$ACR_REGISTRY/$ACR_NAMESPACE/hermes-agent"
+          {
+            echo 'list<<TAGS'
+            if [ "$GITHUB_REF_NAME" = "main" ]; then
+              echo "${image}:latest"
+              echo "${image}:${GITHUB_SHA}"
+            else
+              echo "${image}:dev-${GITHUB_SHA}"
+            fi
+            echo 'TAGS'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push hermes-agent
         uses: docker/build-push-action@v6
         with:
@@ -51,8 +70,6 @@ jobs:
           # 传统单 manifest, ACR 才能接收.
           provenance: false
           sbom: false
-          tags: |
-            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/hermes-agent:latest
-            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/hermes-agent:${{ github.sha }}
+          tags: ${{ steps.tags.outputs.list }}
           cache-from: type=gha,scope=hermes-agent
           cache-to: type=gha,mode=max,scope=hermes-agent
